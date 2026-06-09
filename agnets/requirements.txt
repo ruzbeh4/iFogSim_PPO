@@ -1,0 +1,18 @@
+# python_agent/requirements.txt
+#
+# All dependencies are from the Python standard library — nothing to install.
+#
+# Runtime requirements
+# ─────────────────────
+#   socket        – TCP server and client (stdlib)
+#   socketserver  – ThreadingMixIn TCP server (stdlib)
+#   json          – serialise / deserialise JSON messages (stdlib)
+#   threading     – per-connection threads (stdlib)
+#   random, copy  – GA operators (stdlib)
+#   abc           – abstract base class (stdlib)
+#   argparse      – CLI flags for server.py (stdlib)
+#
+# Python version: 3.10+ (uses X | Y union types in type hints)
+#
+# If you want to add PPO later, install:
+#   pip install torch numpy gymnasium

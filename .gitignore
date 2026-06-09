@@ -1,8 +1,37 @@
-# The .idea folder files also can be added here if desired
+# ── Java ─────────────────────────────────────────────────────────────────────
 bin/
-.classpath
-.settings/
-.project
+**/bin/
 out/
-*.iml
-.idea/
+**/out/
+output/
+**/output/
+results/
+**/results/
+*.class
+*.jar
+.classpath
+.project
+.settings/
+**/.idea/
+**/.vscode/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+**/venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+python_agent/results/
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+*/.DS_Store
+
