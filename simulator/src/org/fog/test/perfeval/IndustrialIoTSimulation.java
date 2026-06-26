@@ -25,6 +25,8 @@ import org.fog.utils.MicroservicePlacementConfig;
 import org.fog.utils.TimeKeeper;
 import org.fog.utils.distribution.DeterministicDistribution;
 
+import org.fog.application.selectivity.SeededSelectivity;
+
 import java.util.*;
 
 /**
@@ -104,6 +106,8 @@ public class IndustrialIoTSimulation {
     static final int GW_TO_CLOUD_LATENCY  = 100;
     /** Uplink latency (ms) from IoT client to its gateway. */
     static final int IOT_TO_GW_LATENCY    = 20;
+
+    static final long SIM_SEED = 42L;
 
     // ── Sensor parameters ────────────────────────────────────────────────────
     /** Seconds between successive sensor transmissions (deterministic). */
@@ -441,7 +445,7 @@ public class IndustrialIoTSimulation {
          * Selectivity: fraction of output tuples emitted per input tuple.
          */
         app.addTupleMapping("data_preprocessor",  "IoT_SENSOR",      "FILTERED_DATA",
-                new FractionalSelectivity(0.8));   // 20% of raw data is filtered out
+                new SeededSelectivity(0.8, SIM_SEED));   // 20% of raw data is filtered out
 
         app.addTupleMapping("smart_analyzer",      "FILTERED_DATA",   "ANALYSIS_RESULT",
                 new FractionalSelectivity(1.0));   // every filtered sample produces an analysis

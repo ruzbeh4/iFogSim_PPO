@@ -201,14 +201,14 @@ public class PythonBridgePlacementLogic extends ClusteredMicroservicePlacementLo
                     device.getId(), Collections.emptyMap());
 
             sb.append("{")
-              .append("\"id\":").append(device.getId()).append(",")
-              .append("\"name\":\"").append(escape(device.getName())).append("\",")
-              .append("\"level\":").append(device.getLevel()).append(",")
-              .append("\"parentId\":").append(device.getParentId()).append(",")
-              .append("\"availableMips\":").append(res.getOrDefault(ControllerComponent.CPU, 0.0)).append(",")
-              .append("\"availableRam\":").append(res.getOrDefault(ControllerComponent.RAM, 0.0)).append(",")
-              .append("\"currentLoad\":").append(getCurrentCpuLoad().getOrDefault(device.getId(), 0.0))
-              .append("}");
+                    .append("\"id\":").append(device.getId()).append(",")
+                    .append("\"name\":\"").append(escape(device.getName())).append("\",")
+                    .append("\"level\":").append(device.getLevel()).append(",")
+                    .append("\"parentId\":").append(device.getParentId()).append(",")
+                    .append("\"availableMips\":").append(res.getOrDefault(ControllerComponent.CPU, 0.0)).append(",")
+                    .append("\"availableRam\":").append(res.getOrDefault(ControllerComponent.RAM, 0.0)).append(",")
+                    .append("\"currentLoad\":").append(getCurrentCpuLoad().getOrDefault(device.getId(), 0.0))
+                    .append("}");
         }
         sb.append("],");
 
@@ -222,20 +222,25 @@ public class PythonBridgePlacementLogic extends ClusteredMicroservicePlacementLo
             firstReq = false;
 
             sb.append("{")
-              .append("\"requestId\":").append(pr.getPlacementRequestId()).append(",")
-              .append("\"appId\":\"").append(escape(pr.getApplicationId())).append("\",")
-              .append("\"gatewayDeviceId\":").append(pr.getGatewayDeviceId()).append(",");
+                    .append("\"requestId\":").append(pr.getPlacementRequestId()).append(",")
+                    .append("\"appId\":\"").append(escape(pr.getApplicationId())).append("\",")
+                    .append("\"gatewayDeviceId\":").append(pr.getGatewayDeviceId()).append(",");
 
             // Already placed modules
             Map<String, Integer> placed = mappedMicroservices.get(pr.getPlacementRequestId());
             sb.append("\"alreadyPlaced\":{");
             if (placed != null) {
                 boolean firstP = true;
-                for (Map.Entry<String, Integer> e : placed.entrySet()) {
+
+                // --- DETERMINISTIC FIX: Sort keys alphabetically before appending ---
+                java.util.List<String> sortedKeys = new java.util.ArrayList<>(placed.keySet());
+                java.util.Collections.sort(sortedKeys);
+
+                for (String key : sortedKeys) {
                     if (!firstP) sb.append(",");
                     firstP = false;
-                    sb.append("\"").append(escape(e.getKey())).append("\":")
-                      .append(e.getValue());
+                    sb.append("\"").append(escape(key)).append("\":")
+                            .append(placed.get(key));
                 }
             }
             sb.append("},");
@@ -250,10 +255,10 @@ public class PythonBridgePlacementLogic extends ClusteredMicroservicePlacementLo
                 if (!firstMod) sb.append(",");
                 firstMod = false;
                 sb.append("{")
-                  .append("\"name\":\"").append(escape(module.getName())).append("\",")
-                  .append("\"requiredMips\":").append((double) module.getMips()).append(",")
-                  .append("\"requiredRam\":").append((double) module.getRam())
-                  .append("}");
+                        .append("\"name\":\"").append(escape(module.getName())).append("\",")
+                        .append("\"requiredMips\":").append((double) module.getMips()).append(",")
+                        .append("\"requiredRam\":").append((double) module.getRam())
+                        .append("}");
             }
             sb.append("]}");
         }
