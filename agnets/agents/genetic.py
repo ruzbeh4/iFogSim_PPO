@@ -40,6 +40,7 @@ TOURNAMENT_K    candidates drawn for tournament selection
 
 import random
 import copy
+from collections import defaultdict
 from .base_agent import BasePlacementAgent
 
 
@@ -165,33 +166,75 @@ class GeneticAgent(BasePlacementAgent):
         # Track load committed by this chromosome (separate from live state)
         load: dict[int, float] = {d["id"]: 0.0 for d in candidates}
 
-        latency_cost = 0.0
         energy_cost  = 0.0
         infeasible   = 0.0
 
-        for gene, (req, mod) in zip(chromosome, slots):
-            device    = candidates[gene]
-            dev_id    = device["id"]
-            req_mips  = mod["requiredMips"]
-            req_ram   = mod["requiredRam"]
+        # Track which device each module of each request is assigned to,
+        # so we can compute full E2E latency including inter-device hops.
+        req_device: dict[int, dict[str, dict]] = defaultdict(dict)
 
-            # Latency component: cloud (level 0) = 120 ms from IoT,
-            # fog (level 1) = 20 ms.  Higher real latency → higher cost.
-            lw = LATENCY_WEIGHTS.get(mod["name"], 1.0)
-            latency_cost += lw * LEVEL_LATENCY_MS.get(device["level"], 120.0)
+        for gene, (req, mod) in zip(chromosome, slots):
+            device   = candidates[gene]
+            dev_id   = device["id"]
+            req_id   = req["requestId"]
+
+            req_device[req_id][mod["name"]] = device
 
             # Energy component: load fraction after adding this module
-            load[dev_id] += req_mips
-            avail_mips    = max(device["availableMips"], 1.0)  # avoid /0
+            load[dev_id] += mod["requiredMips"]
+            avail_mips    = max(device["availableMips"], 1.0)
             energy_cost  += load[dev_id] / avail_mips
 
-            # Infeasibility penalty for exceeding MIPS or RAM
+            # Infeasibility penalty for exceeding MIPS or RAM.
+            # Must be much larger than the max latency savings (~600) so the GA
+            # never prefers an overloaded fog device over a legal cloud placement.
             if load[dev_id] > device["availableMips"]:
-                infeasible += (load[dev_id] - device["availableMips"]) / avail_mips * 10
-            if req_ram > device["availableRam"]:
-                infeasible += 1.0
+                infeasible += (load[dev_id] - device["availableMips"]) / avail_mips * 5000
+            if mod["requiredRam"] > device["availableRam"]:
+                infeasible += 5000.0
+
+        # Latency component: computed per request using the full E2E path.
+        # This correctly penalises SA and AC placed on different fog gateways
+        # (which route through cloud, adding 200 ms inter-gateway hop).
+        latency_cost = 0.0
+        for req_id, modules in req_device.items():
+            sa_dev = modules.get("smart_analyzer")
+            ac_dev = modules.get("actuator_controller")
+            if sa_dev and ac_dev:
+                e2e = self._e2e_ms(sa_dev, ac_dev)
+                latency_cost += (LATENCY_WEIGHTS["smart_analyzer"] +
+                                 LATENCY_WEIGHTS["actuator_controller"]) * e2e
+            else:
+                for mod_name, dev in modules.items():
+                    lw = LATENCY_WEIGHTS.get(mod_name, 1.0)
+                    latency_cost += lw * LEVEL_LATENCY_MS.get(dev["level"], 120.0)
 
         return W_LATENCY * latency_cost + W_ENERGY * energy_cost + infeasible
+
+    @staticmethod
+    def _e2e_ms(sa_dev: dict, ac_dev: dict) -> float:
+        """
+        Full round-trip latency (ms) for one request:
+          IoT → SA → AC → IoT
+        Accounts for inter-device routing when SA and AC are on different nodes.
+        """
+        IOT_TO_LEVEL = {0: 120.0, 1: 20.0, 2: 0.0}
+        sa_lvl = sa_dev["level"]
+        ac_lvl = ac_dev["level"]
+
+        uplink   = IOT_TO_LEVEL.get(sa_lvl, 120.0)   # IoT → SA
+        downlink = IOT_TO_LEVEL.get(ac_lvl, 120.0)   # AC → IoT
+
+        if sa_dev["id"] == ac_dev["id"]:
+            inter = 0.0     # co-located: no network hop
+        elif sa_lvl == 1 and ac_lvl == 1:
+            inter = 200.0   # different fog gateways: must route via cloud (100+100)
+        elif {sa_lvl, ac_lvl} == {0, 1}:
+            inter = 100.0   # cloud ↔ fog
+        else:
+            inter = 0.0     # both on cloud (same datacenter)
+
+        return 2.0 + uplink + inter + downlink  # +2 for sensor/actuator wire
 
     def _tournament_select(
         self, scored: list[tuple[float, list[int]]]

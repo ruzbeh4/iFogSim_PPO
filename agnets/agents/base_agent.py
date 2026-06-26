@@ -53,10 +53,6 @@ from abc import ABC, abstractmethod
 class BasePlacementAgent(ABC):
     """Abstract base class for microservice placement agents."""
 
-    # ------------------------------------------------------------------
-    # Interface
-    # ------------------------------------------------------------------
-
     @abstractmethod
     def decide(self, state: dict) -> dict:
         """
@@ -72,10 +68,6 @@ class BasePlacementAgent(ABC):
         dict
             Action message: {"placement": {requestId: {moduleName: deviceId}}}
         """
-
-    # ------------------------------------------------------------------
-    # Shared helpers available to all subclasses
-    # ------------------------------------------------------------------
 
     @staticmethod
     def candidate_devices(state: dict) -> list[dict]:

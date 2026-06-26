@@ -34,35 +34,25 @@ import socketserver
 import threading
 import time
 
-from agnets.agents import HeuristicAgent, GeneticAgent
+from agents import HeuristicAgent, GeneticAgent
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Agent registry
-# ─────────────────────────────────────────────────────────────────────────────
 AGENTS = {
     "heuristic": HeuristicAgent,
     "genetic":   GeneticAgent,
 }
 
-# Single shared agent instance (stateless between calls – thread-safe)
 _agent      = None
 _agent_name = "heuristic"
 
-# Directory where results JSON files are saved
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Request handler
-# ─────────────────────────────────────────────────────────────────────────────
 
 class PlacementHandler(socketserver.StreamRequestHandler):
     """
     Handles one TCP connection from the Java bridge.
     Dispatches to _handle_placement() or _handle_results() based on message type.
     """
-
     def handle(self):
         try:
             raw = self.rfile.readline()
@@ -71,7 +61,6 @@ class PlacementHandler(socketserver.StreamRequestHandler):
 
             payload = json.loads(raw.decode("utf-8").strip())
 
-            # ── Dispatch on message type ──────────────────────────────────────
             if payload.get("type") == "results":
                 self._handle_results(payload)
             else:
@@ -83,7 +72,6 @@ class PlacementHandler(socketserver.StreamRequestHandler):
             print(f"[Server] Unexpected error: {exc}")
             import traceback; traceback.print_exc()
 
-    # ── Placement request ─────────────────────────────────────────────────────
 
     def _handle_placement(self, state: dict):
         """Calls the active agent and writes its decision back to Java."""
@@ -113,13 +101,11 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         then sends an acknowledgement back to Java.
         The Java side closes its socket after reading the ack.
         """
-        results["agent"] = _agent_name   # annotate which algorithm was used
+        results["agent"] = _agent_name
 
-        # ── Compute estimated end-to-end latency from placement decisions ─────
-        latency_stats = _compute_latency(results)
-        results["latency"] = latency_stats
+        # latency_stats = _compute_latency(results)
+        # results["latency"] = latency_stats
 
-        # ── Print human-readable summary ──────────────────────────────────────
         print("\n" + "=" * 60)
         print("  SIMULATION RESULTS")
         print("=" * 60)
@@ -129,11 +115,11 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         print(f"  Cloud cost       : {results.get('cloudCost', 0):,.1f}")
         print(f"  Requests placed  : {results.get('numRequests', '?')}")
 
-        print("\n  Estimated E2E latency (ms):")
-        print(f"    avg  : {latency_stats['avg_ms']:>8.1f}")
-        print(f"    min  : {latency_stats['min_ms']:>8.1f}")
-        print(f"    max  : {latency_stats['max_ms']:>8.1f}")
-        print(f"    edge : {latency_stats['edge_pct']:>7.1f}%  placements on fog/IoT")
+        # print("\n  Estimated E2E latency (ms):")
+        # print(f"    avg  : {latency_stats['avg_ms']:>8.1f}")
+        # print(f"    min  : {latency_stats['min_ms']:>8.1f}")
+        # print(f"    max  : {latency_stats['max_ms']:>8.1f}")
+        # print(f"    edge : {latency_stats['edge_pct']:>7.1f}%  placements on fog/IoT")
 
         print("\n  Energy per device:")
         for dev in results.get("energyPerDevice", []):
@@ -145,10 +131,10 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         print("\n  Placement decisions:")
         for p in results.get("placements", []):
             print(f"    step={p['step']}  req={p['requestId']}  "
-                  f"{p['module']:<24} → {p['device']}  ({latency_stats['per_request'].get(str(p['requestId']), {}).get('e2e_ms', '?')} ms)")
+                #   f"{p['module']:<24} → {p['device']}  ({latency_stats['per_request'].get(str(p['requestId']), {}).get('e2e_ms', '?')} ms)")
+                f"{p['module']:<24} → {p['device']}")
         print("=" * 60 + "\n")
 
-        # ── Save to JSON file ─────────────────────────────────────────────────
         os.makedirs(RESULTS_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename  = f"{_agent_name}_{timestamp}.json"
@@ -159,20 +145,11 @@ class PlacementHandler(socketserver.StreamRequestHandler):
 
         print(f"[Server] Results saved → {filepath}")
 
-        # ── Acknowledge to Java ───────────────────────────────────────────────
         ack = json.dumps({"status": "saved", "file": filepath}) + "\n"
         self.wfile.write(ack.encode("utf-8"))
         self.wfile.flush()
 
-        # Shut the server down after this handler returns.
-        # Must run in a separate thread: server.shutdown() blocks until
-        # serve_forever() exits, so calling it from inside a handler deadlocks.
         threading.Thread(target=self.server.shutdown, daemon=True).start()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Server bootstrap
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
@@ -219,38 +196,38 @@ def _compute_latency(results: dict) -> dict:
     # Build device-name → level lookup
     level_map = {d["name"]: d["level"] for d in results.get("energyPerDevice", [])}
 
-    # Group placements by request ID
+    # Group placements by request ID, storing (device_name, level) per module
     from collections import defaultdict
-    by_req: dict[str, dict[str, int]] = defaultdict(dict)
+    by_req: dict[str, dict[str, tuple]] = defaultdict(dict)
     for p in results.get("placements", []):
         lvl = level_map.get(p["device"], 0)
-        by_req[str(p["requestId"])][p["module"]] = lvl
+        by_req[str(p["requestId"])][p["module"]] = (p["device"], lvl)
 
     per_request = {}
     latencies   = []
 
     for req_id, modules in by_req.items():
-        sa_lvl = modules.get("smart_analyzer",      0)
-        ac_lvl = modules.get("actuator_controller", 0)
+        sa_name,  sa_lvl  = modules.get("smart_analyzer",      (None, 0))
+        ac_name,  ac_lvl  = modules.get("actuator_controller", (None, 0))
 
-        # Full round-trip:
-        #   1 ms  sensor wire
-        #   0 ms  IoT → data_preprocessor  (same device)
-        #   X ms  data_preprocessor → smart_analyzer
-        #   Y ms  smart_analyzer → actuator_controller
-        #   Z ms  actuator_controller → data_preprocessor
-        #   0 ms  data_preprocessor → ACTUATOR  (same device)
-        #   1 ms  actuator wire
-        e2e = (1
-               + IOT_TO_LEVEL[sa_lvl]       # dp → sa (uplink)
-               + hop(sa_lvl, ac_lvl)        # sa → ac
-               + IOT_TO_LEVEL[ac_lvl]       # ac → dp (downlink)
-               + 1)
+        uplink   = IOT_TO_LEVEL.get(sa_lvl, 120)
+        downlink = IOT_TO_LEVEL.get(ac_lvl, 120)
+
+        if sa_name == ac_name:
+            inter = 0           # co-located, no network hop
+        elif sa_lvl == 1 and ac_lvl == 1:
+            inter = 200         # different fog gateways → via cloud
+        elif {sa_lvl, ac_lvl} == {0, 1}:
+            inter = 100         # cloud ↔ fog
+        else:
+            inter = 0           # both on cloud (same datacenter)
+
+        e2e = 2 + uplink + inter + downlink 
 
         per_request[req_id] = {
-            "smart_analyzer_level":      sa_lvl,
-            "actuator_controller_level": ac_lvl,
-            "e2e_ms":                    e2e,
+            "smart_analyzer_device":      sa_name,
+            "actuator_controller_device": ac_name,
+            "e2e_ms":                     e2e,
         }
         latencies.append(e2e)
 
@@ -260,7 +237,7 @@ def _compute_latency(results: dict) -> dict:
 
     total_placements = sum(len(m) for m in by_req.values())
     edge_placements  = sum(
-        1 for m in by_req.values() for lvl in m.values() if lvl > 0
+        1 for m in by_req.values() for _, lvl in m.values() if lvl > 0
     )
 
     return {
@@ -273,7 +250,6 @@ def _compute_latency(results: dict) -> dict:
 
 
 def _device_name(state: dict, device_id: int) -> str:
-    """Resolves a numeric device ID to its name for log output."""
     for d in state.get("devices", []):
         if d["id"] == device_id:
             return d["name"]

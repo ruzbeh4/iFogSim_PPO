@@ -66,10 +66,6 @@ import java.util.*;
  */
 public class IndustrialIoTSimulation {
 
-    // -------------------------------------------------------------------------
-    // Simulation-wide state
-    // -------------------------------------------------------------------------
-
     static List<FogDevice> fogDevices = new ArrayList<>();
     static List<Sensor>    sensors    = new ArrayList<>();
     static List<Actuator>  actuators  = new ArrayList<>();
@@ -89,6 +85,7 @@ public class IndustrialIoTSimulation {
      * Swap to PlacementLogicFactory.CLUSTERED_MICROSERVICES_PLACEMENT for
      * the built-in heuristic baseline (no Python agent required).
      */
+//    static final int PLACEMENT_ALGO = PlacementLogicFactory.CLUSTERED_MICROSERVICES_PLACEMENT;
     static final int PLACEMENT_ALGO = PlacementLogicFactory.PYTHON_BRIDGE_PLACEMENT;
 
     // ── Topology parameters ──────────────────────────────────────────────────
@@ -115,15 +112,12 @@ public class IndustrialIoTSimulation {
     // ── Cluster latency (not used in this flat topology, kept for API compat) ──
     static final double CLUSTER_LATENCY = 2.0;
 
-    // -------------------------------------------------------------------------
-    // Entry point
-    // -------------------------------------------------------------------------
 
     public static void main(String[] args) {
         Log.printLine("Starting IndustrialIoTSimulation (Industry 4.0 scenario)...");
 
         try {
-            Log.disable(); // suppress CloudSim's internal event log; our bridge prints its own
+            Log.disable();
             int num_user    = 1;
             Calendar cal    = Calendar.getInstance();
             boolean tracing = false;
@@ -205,9 +199,7 @@ public class IndustrialIoTSimulation {
             TimeKeeper.getInstance().setSimulationStartTime(
                     Calendar.getInstance().getTimeInMillis());
 
-            // MicroservicesController calls System.exit(0) when the simulation ends,
-            // so code after startSimulation() is never reached.  A shutdown hook is
-            // the only reliable way to run logic before the JVM exits.
+            
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
                 sendResultsToPython(fogDevices, PythonBridgePlacementLogic.PLACEMENT_LOG,
                         PythonBridgePlacementLogic.DEFAULT_HOST,
@@ -427,7 +419,7 @@ public class IndustrialIoTSimulation {
          */
         // Raw sensor data enters the pipeline at the edge
         app.addAppEdge("IoT_SENSOR",        "data_preprocessor",  2000, 500,
-                "RAW_SENSOR_DATA",  Tuple.UP, AppEdge.SENSOR);
+            "IoT_SENSOR",       Tuple.UP, AppEdge.SENSOR);
 
         // Filtered data travels up to the smart analyzer for inference
         app.addAppEdge("data_preprocessor", "smart_analyzer",      3500, 500,
@@ -448,7 +440,7 @@ public class IndustrialIoTSimulation {
         /*
          * Selectivity: fraction of output tuples emitted per input tuple.
          */
-        app.addTupleMapping("data_preprocessor",  "RAW_SENSOR_DATA", "FILTERED_DATA",
+        app.addTupleMapping("data_preprocessor",  "IoT_SENSOR",      "FILTERED_DATA",
                 new FractionalSelectivity(0.8));   // 20% of raw data is filtered out
 
         app.addTupleMapping("smart_analyzer",      "FILTERED_DATA",   "ANALYSIS_RESULT",

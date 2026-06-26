@@ -8,7 +8,6 @@ output/
 results/
 **/results/
 *.class
-*.jar
 .classpath
 .project
 .settings/
