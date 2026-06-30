@@ -102,9 +102,9 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         The Java side closes its socket after reading the ack.
         """
         results["agent"] = _agent_name
-
-        # latency_stats = _compute_latency(results)
-        # results["latency"] = latency_stats
+        loop_delay   = results.get("loopDelay")
+        loop_samples = results.get("loopSampleCount", 0)
+        cpu_delays   = results.get("tupleCpuDelays", {})
 
         print("\n" + "=" * 60)
         print("  SIMULATION RESULTS")
@@ -115,11 +115,16 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         print(f"  Cloud cost       : {results.get('cloudCost', 0):,.1f}")
         print(f"  Requests placed  : {results.get('numRequests', '?')}")
 
-        # print("\n  Estimated E2E latency (ms):")
-        # print(f"    avg  : {latency_stats['avg_ms']:>8.1f}")
-        # print(f"    min  : {latency_stats['min_ms']:>8.1f}")
-        # print(f"    max  : {latency_stats['max_ms']:>8.1f}")
-        # print(f"    edge : {latency_stats['edge_pct']:>7.1f}%  placements on fog/IoT")
+        if loop_delay is not None:
+            print(f"  E2E loop delay   : {loop_delay:,.2f} ms  "
+                  f"(TimeKeeper, avg over {loop_samples} completed loops)")
+        else:
+            print(f"  E2E loop delay   : n/a")
+
+        if cpu_delays:
+            print("\n  Tuple CPU execution delay (ms):")
+            for tuple_type, delay_ms in cpu_delays.items():
+                print(f"    {tuple_type:<24} {delay_ms:>10.4f}")
 
         print("\n  Energy per device:")
         for dev in results.get("energyPerDevice", []):
@@ -131,8 +136,19 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         print("\n  Placement decisions:")
         for p in results.get("placements", []):
             print(f"    step={p['step']}  req={p['requestId']}  "
-                #   f"{p['module']:<24} → {p['device']}  ({latency_stats['per_request'].get(str(p['requestId']), {}).get('e2e_ms', '?')} ms)")
                 f"{p['module']:<24} → {p['device']}")
+
+        mobility = results.get("mobility", {})
+        if mobility:
+            print(f"\n  Mobility traces (seeded random walk, {len(mobility)} mobile devices):")
+            for name, trace in list(mobility.items())[:5]:
+                start = trace[0]
+                end   = trace[-1]
+                dist  = ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5
+                print(f"    {name:<24} {len(trace)} steps, net displacement {dist:.1f} m")
+            if len(mobility) > 5:
+                print(f"    ... and {len(mobility) - 5} more (full traces saved to JSON)")
+
         print("=" * 60 + "\n")
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -159,94 +175,6 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
     allow_reuse_address = True
     daemon_threads      = True
-
-
-def _compute_latency(results: dict) -> dict:
-    """
-    Estimates end-to-end control-loop latency from placement decisions.
-
-    TimeKeeper's built-in loop tracking does not work in iFogSim2 microservices
-    mode, so we derive latency analytically from the network topology:
-
-      IoT_SENSOR → data_preprocessor (IoT, L2)
-                 → smart_analyzer    (Python-placed)
-                 → actuator_controller (Python-placed)
-                 → data_preprocessor (IoT, L2)
-                 → ACTUATOR
-
-    Hop latencies match the constants in IndustrialIoTSimulation.java:
-      IoT  → FogGW : 20 ms   (IOT_TO_GW_LATENCY)
-      FogGW → Cloud : 100 ms  (GW_TO_CLOUD_LATENCY)
-      sensor/actuator wire : 1 ms each side
-    """
-    # One-way latency from IoT (L2) to a module at the given level
-    IOT_TO_LEVEL = {0: 120, 1: 20, 2: 0}   # cloud=120, fog=20, IoT=0
-
-    # One-way latency between two modules based on their device levels.
-    # Assumes same-level same-device = 0, otherwise route via parent.
-    def hop(level_a: int, level_b: int) -> int:
-        if level_a == level_b:
-            return 0                        # co-located (best case)
-        if {level_a, level_b} == {0, 1}:
-            return 100                      # cloud ↔ fog gateway
-        if {level_a, level_b} == {1, 2}:
-            return 20                       # fog gateway ↔ IoT
-        return 120                          # cloud ↔ IoT (two hops)
-
-    # Build device-name → level lookup
-    level_map = {d["name"]: d["level"] for d in results.get("energyPerDevice", [])}
-
-    # Group placements by request ID, storing (device_name, level) per module
-    from collections import defaultdict
-    by_req: dict[str, dict[str, tuple]] = defaultdict(dict)
-    for p in results.get("placements", []):
-        lvl = level_map.get(p["device"], 0)
-        by_req[str(p["requestId"])][p["module"]] = (p["device"], lvl)
-
-    per_request = {}
-    latencies   = []
-
-    for req_id, modules in by_req.items():
-        sa_name,  sa_lvl  = modules.get("smart_analyzer",      (None, 0))
-        ac_name,  ac_lvl  = modules.get("actuator_controller", (None, 0))
-
-        uplink   = IOT_TO_LEVEL.get(sa_lvl, 120)
-        downlink = IOT_TO_LEVEL.get(ac_lvl, 120)
-
-        if sa_name == ac_name:
-            inter = 0           # co-located, no network hop
-        elif sa_lvl == 1 and ac_lvl == 1:
-            inter = 200         # different fog gateways → via cloud
-        elif {sa_lvl, ac_lvl} == {0, 1}:
-            inter = 100         # cloud ↔ fog
-        else:
-            inter = 0           # both on cloud (same datacenter)
-
-        e2e = 2 + uplink + inter + downlink 
-
-        per_request[req_id] = {
-            "smart_analyzer_device":      sa_name,
-            "actuator_controller_device": ac_name,
-            "e2e_ms":                     e2e,
-        }
-        latencies.append(e2e)
-
-    if not latencies:
-        return {"avg_ms": 0, "min_ms": 0, "max_ms": 0,
-                "edge_pct": 0, "per_request": {}}
-
-    total_placements = sum(len(m) for m in by_req.values())
-    edge_placements  = sum(
-        1 for m in by_req.values() for _, lvl in m.values() if lvl > 0
-    )
-
-    return {
-        "avg_ms":      round(sum(latencies) / len(latencies), 2),
-        "min_ms":      min(latencies),
-        "max_ms":      max(latencies),
-        "edge_pct":    round(edge_placements / total_placements * 100, 1) if total_placements else 0,
-        "per_request": per_request,
-    }
 
 
 def _device_name(state: dict, device_id: int) -> str:

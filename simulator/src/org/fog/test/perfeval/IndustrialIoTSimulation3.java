@@ -41,6 +41,9 @@ public class IndustrialIoTSimulation3 {
     static final String APP_ID = "industrial_iot";
     static Application application;
 
+    /** Loop ID of the sensor-to-actuator AppLoop, used to read TimeKeeper's measured latency. */
+    static int e2eLoopId = -1;
+
     // =====================================================================
     // 🎛️ SEED DASHBOARD
     // =====================================================================
@@ -49,6 +52,15 @@ public class IndustrialIoTSimulation3 {
     static final long SEED_DEVICE_TYPE  = 404L; // Controls fixed vs mobile assignment
     static final long SEED_MOBILITY     = 303L; // Reserved for Dynamic Mode PPO
     // =====================================================================
+
+    // ── Mobility (lightweight seeded random-walk position tracking) ─────────
+    // Positions don't affect placement or gateway assignment yet (STATIC mode);
+    // this just precomputes a reproducible trajectory per MobileRobot so it's
+    // ready to feed into a future Dynamic Mode / PPO state representation.
+    static final int    MOBILITY_STEPS     = 20;   // random-walk steps per device
+    static final double MOBILITY_STEP_M    = 5.0;  // meters per step
+    /** deviceName → list of [x, y] positions (meters, relative to start) over the walk. */
+    static final Map<String, List<double[]>> mobilityTraces = new LinkedHashMap<>();
 
     static final int PLACEMENT_ALGO = PlacementLogicFactory.PYTHON_BRIDGE_PLACEMENT;
 
@@ -159,6 +171,10 @@ public class IndustrialIoTSimulation3 {
         iotDevice.setUplinkLatency(IOT_TO_GW_LATENCY);
         fogDevices.add(iotDevice);
 
+        if (isMobile) {
+            mobilityTraces.put(deviceName, generateRandomWalk(iotDevice.getId()));
+        }
+
         long deviceTrafficSeed = SEED_TRAFFIC + iotDevice.getId();
 
         Sensor periodicSensor = new Sensor("sensor-periodic-" + deviceName, "IoT_SENSOR", userId, APP_ID,
@@ -180,6 +196,26 @@ public class IndustrialIoTSimulation3 {
         actuator.setLatency(1.0);
         actuator.setApp(application);
         actuators.add(actuator);
+    }
+
+    /**
+     * Generates a reproducible 2D random-walk trajectory for a mobile device.
+     * Each step moves MOBILITY_STEP_M meters in a uniformly random direction.
+     * Seeded by SEED_MOBILITY + deviceId so every device gets a distinct but
+     * deterministic path across runs.
+     */
+    private static List<double[]> generateRandomWalk(int deviceId) {
+        Random rnd = new Random(SEED_MOBILITY + deviceId);
+        List<double[]> trace = new ArrayList<>(MOBILITY_STEPS);
+        double x = 0.0, y = 0.0;
+        trace.add(new double[]{x, y});
+        for (int i = 1; i < MOBILITY_STEPS; i++) {
+            double angle = rnd.nextDouble() * 2 * Math.PI;
+            x += Math.cos(angle) * MOBILITY_STEP_M;
+            y += Math.sin(angle) * MOBILITY_STEP_M;
+            trace.add(new double[]{x, y});
+        }
+        return trace;
     }
 
     private static MicroserviceFogDevice createFogDevice(String nodeName, long mips, int ram, long upBw, long downBw, int level, double ratePerMips, double busyPower, double idlePower, String deviceType) {
@@ -221,6 +257,7 @@ public class IndustrialIoTSimulation3 {
 
         final AppLoop e2eLoop = new AppLoop(new ArrayList<String>() {{ add("IoT_SENSOR"); add("data_preprocessor"); add("smart_analyzer"); add("actuator_controller"); add("data_preprocessor"); add("ACTUATOR"); }});
         app.setLoops(new ArrayList<AppLoop>() {{ add(e2eLoop); }});
+        e2eLoopId = e2eLoop.getLoopId();
         app.createDAG();
         return app;
     }
@@ -270,6 +307,40 @@ public class IndustrialIoTSimulation3 {
             FogDevice cloud = getFogDeviceByName("cloud");
             double cloudCost = (cloud != null) ? cloud.getTotalCost() : 0.0;
             sb.append("\"cloudCost\":").append(cloudCost).append(",");
+
+            // E2E loop latency, as measured by TimeKeeper across the actual tuple chain
+            Double loopDelay = TimeKeeper.getInstance().getLoopIdToCurrentAverage().get(e2eLoopId);
+            sb.append("\"loopDelay\":").append(loopDelay != null ? loopDelay : "null").append(",");
+
+            Integer loopSampleCount = TimeKeeper.getInstance().getLoopIdToCurrentNum().get(e2eLoopId);
+            sb.append("\"loopSampleCount\":").append(loopSampleCount != null ? loopSampleCount : 0).append(",");
+
+            // Per-tuple-type CPU execution delay (queueing + processing time on the PE)
+            sb.append("\"tupleCpuDelays\":{");
+            boolean firstTupleType = true;
+            for (Map.Entry<String, Double> entry : TimeKeeper.getInstance().getTupleTypeToAverageCpuTime().entrySet()) {
+                if (!firstTupleType) sb.append(",");
+                firstTupleType = false;
+                sb.append("\"").append(entry.getKey()).append("\":").append(entry.getValue());
+            }
+            sb.append("},");
+
+            // Seeded random-walk position traces for mobile devices (meters, relative to start)
+            sb.append("\"mobility\":{");
+            boolean firstTrace = true;
+            for (Map.Entry<String, List<double[]>> entry : mobilityTraces.entrySet()) {
+                if (!firstTrace) sb.append(",");
+                firstTrace = false;
+                sb.append("\"").append(entry.getKey()).append("\":[");
+                boolean firstPoint = true;
+                for (double[] point : entry.getValue()) {
+                    if (!firstPoint) sb.append(",");
+                    firstPoint = false;
+                    sb.append("[").append(point[0]).append(",").append(point[1]).append("]");
+                }
+                sb.append("]");
+            }
+            sb.append("},");
 
             sb.append("\"numRequests\":").append(placementLog.stream()
                     .map(e -> e.get("requestId")).distinct().count()).append(",");

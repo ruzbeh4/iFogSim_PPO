@@ -82,6 +82,9 @@ public class IndustrialIoTSimulation {
      */
     static Application application;
 
+    /** Loop ID of the sensor-to-actuator AppLoop, used to read TimeKeeper's measured latency. */
+    static int e2eLoopId = -1;
+
     /**
      * Placement algorithm to use.
      * Swap to PlacementLogicFactory.CLUSTERED_MICROSERVICES_PLACEMENT for
@@ -469,6 +472,7 @@ public class IndustrialIoTSimulation {
             add("ACTUATOR");
         }});
         app.setLoops(new ArrayList<AppLoop>() {{ add(e2eLoop); }});
+        e2eLoopId = e2eLoop.getLoopId();
 
         // No special (forced) placements – Python agent decides where smart_analyzer
         // and actuator_controller live.
@@ -507,6 +511,11 @@ public class IndustrialIoTSimulation {
      *     { "name": <str>, "level": <int>, "energy": <float> }, ...
      *   ],
      *   "cloudCost": <float>,            // cloud execution cost
+     *   "loopDelay": <float|null>,       // TimeKeeper-measured avg E2E loop latency (ms)
+     *   "loopSampleCount": <int>,        // number of completed loop traversals averaged into loopDelay
+     *   "tupleCpuDelays": {              // TimeKeeper per-tuple-type avg CPU execution time (ms)
+     *     "<tupleType>": <float>, ...
+     *   },
      *   "numRequests": <int>,            // total placement requests processed
      *   "placements": [
      *     { "step": <int>, "requestId": <int>, "module": <str>,
@@ -559,6 +568,23 @@ public class IndustrialIoTSimulation {
             FogDevice cloud = getFogDeviceByName("cloud");
             double cloudCost = (cloud != null) ? cloud.getTotalCost() : 0.0;
             sb.append("\"cloudCost\":").append(cloudCost).append(",");
+
+            // E2E loop latency, as measured by TimeKeeper across the actual tuple chain
+            Double loopDelay = TimeKeeper.getInstance().getLoopIdToCurrentAverage().get(e2eLoopId);
+            sb.append("\"loopDelay\":").append(loopDelay != null ? loopDelay : "null").append(",");
+
+            Integer loopSampleCount = TimeKeeper.getInstance().getLoopIdToCurrentNum().get(e2eLoopId);
+            sb.append("\"loopSampleCount\":").append(loopSampleCount != null ? loopSampleCount : 0).append(",");
+
+            // Per-tuple-type CPU execution delay (queueing + processing time on the PE)
+            sb.append("\"tupleCpuDelays\":{");
+            boolean firstTupleType = true;
+            for (Map.Entry<String, Double> entry : TimeKeeper.getInstance().getTupleTypeToAverageCpuTime().entrySet()) {
+                if (!firstTupleType) sb.append(",");
+                firstTupleType = false;
+                sb.append("\"").append(entry.getKey()).append("\":").append(entry.getValue());
+            }
+            sb.append("},");
 
             sb.append("\"numRequests\":").append(placementLog.stream()
                     .map(e -> e.get("requestId")).distinct().count()).append(",");
