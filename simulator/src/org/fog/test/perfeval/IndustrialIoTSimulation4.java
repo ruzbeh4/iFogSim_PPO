@@ -138,6 +138,13 @@ public class IndustrialIoTSimulation4 {
             controller.submitPlacementRequests(placementRequests, 0);
             TimeKeeper.getInstance().setSimulationStartTime(Calendar.getInstance().getTimeInMillis());
 
+            // MicroservicesController.initiatePlacementRequestProcessing() only auto-fires the
+            // first PROCESS_PRS tick on devices typed MicroserviceFogDevice.FON. Our orchestrator
+            // is typed CLOUD (same as every other scenario here), so under PERIODIC mode the
+            // periodic heartbeat would otherwise never start. Kick off the first tick ourselves;
+            // processPlacementRequests() self-reschedules every PLACEMENT_INTERVAL after that.
+            CloudSim.send(cloud.getId(), cloud.getId(), 0, org.fog.utils.FogEvents.PROCESS_PRS, null);
+
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
                     sendResultsToPython(fogDevices, PPOBridgePlacementLogic.PLACEMENT_LOG,
                             PPOBridgePlacementLogic.DEFAULT_HOST,

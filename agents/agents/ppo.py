@@ -107,16 +107,23 @@ class PPOAgent(BasePlacementAgent):
         placements: list[dict] = []
         migrations: list[dict] = []  # placeholder policy never migrates
 
+        # Track MIPS committed *within this call* so that multiple pending modules
+        # in the same batch (e.g. all 150 requests arriving on step 0) don't all
+        # get assigned to whichever device looked emptiest in the state snapshot —
+        # same fix as HeuristicAgent._pick_device()'s committed_mips tracking.
+        committed_mips: dict[int, float] = {d["id"]: 0.0 for d in devices}
+
         for module in state.get("modules", []):
             if module["status"] != "pending":
                 continue
-            device = self._least_loaded_raw(module, devices)
+            device = self._least_loaded_raw(module, devices, committed_mips)
             if device is not None:
                 placements.append({
                     "requestId": module["requestId"],
                     "module":    module["name"],
                     "deviceId":  device["id"],
                 })
+                committed_mips[device["id"]] += module["requiredMips"]
 
         return {"placements": placements, "migrations": migrations}
 
@@ -136,13 +143,17 @@ class PPOAgent(BasePlacementAgent):
         return None
 
     @staticmethod
-    def _least_loaded_raw(module: dict, devices: list[dict]) -> dict | None:
-        """Same idea as _least_loaded(), but for the step protocol's flat device list
-        (no separate currentLoad accumulation needed — Java sends live availableMips)."""
+    def _least_loaded_raw(module: dict, devices: list[dict],
+                           committed_mips: dict[int, float]) -> dict | None:
+        """Same idea as _least_loaded(), but for the step protocol's flat device list,
+        netting out MIPS already committed to each device earlier in this same call."""
         eligible = [d for d in devices if d["level"] < 2]  # exclude IoT/CLIENT leaves
-        sorted_devices = sorted(eligible, key=lambda d: (-d["level"], -d["availableMips"]))
+        sorted_devices = sorted(
+            eligible,
+            key=lambda d: (-d["level"], -(d["availableMips"] - committed_mips[d["id"]]))
+        )
         for device in sorted_devices:
-            if (device["availableMips"] >= module["requiredMips"]
-                    and device["availableRam"] >= module["requiredRam"]):
+            free_mips = device["availableMips"] - committed_mips[device["id"]]
+            if free_mips >= module["requiredMips"] and device["availableRam"] >= module["requiredRam"]:
                 return device
         return None

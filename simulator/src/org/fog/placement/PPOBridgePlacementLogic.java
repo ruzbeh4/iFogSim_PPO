@@ -347,7 +347,14 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         }
     }
 
-    /** Places a module that has no device yet (mirrors PythonBridgePlacementLogic). */
+    /**
+     * Places a module that has no device yet (mirrors PythonBridgePlacementLogic).
+     * Rejects (logs + skips) placements that would exceed the target device's
+     * remaining capacity — the same feasibility guard applyMigration() uses.
+     * Tracks committed load locally per step via getCurrentCpuLoad()/load maps
+     * so multiple modules placed in the SAME batch don't all pile onto whichever
+     * device looked emptiest in the state snapshot sent at the start of the step.
+     */
     private void applyPlacement(int prId, String moduleName, int deviceId) {
         PlacementRequest pr = findPrById(prId);
         if (pr == null) {
@@ -361,6 +368,22 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             return;
         }
         Application app = applicationInfo.get(pr.getApplicationId());
+        AppModule moduleSpec = app.getModuleByName(moduleName);
+        if (moduleSpec == null) return;
+
+        double mips = moduleSpec.getMips();
+        double ram  = moduleSpec.getRam();
+        double availMips = resourceAvailability.getOrDefault(deviceId, Collections.emptyMap())
+                .getOrDefault(ControllerComponent.CPU, 0.0) - getCurrentCpuLoad().getOrDefault(deviceId, 0.0);
+        double availRam  = resourceAvailability.getOrDefault(deviceId, Collections.emptyMap())
+                .getOrDefault(ControllerComponent.RAM, 0.0);
+
+        if (mips > availMips || ram > availRam) {
+            System.err.println("[PPOBridge] Placement of '" + moduleName + "' on "
+                    + device.getName() + " rejected: insufficient capacity.");
+            return;
+        }
+
         recordNewPlacement(prId, moduleName, deviceId, app);
     }
 
