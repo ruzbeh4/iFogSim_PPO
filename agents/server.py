@@ -6,13 +6,22 @@ simulator and returns placement decisions computed by a Python agent.
 Also receives a final "results" message after the simulation ends,
 saves it to disk as JSON, and cleanly closes the connection.
 
-Protocol – two message types on the same port
+Protocol – three message types on the same port
 ──────────────────────────────────────────────
-1. Placement request  (Java → Python)
+1. Placement request  (Java → Python, STATIC+SEQUENTIAL scenarios — heuristic/genetic)
    Single newline-terminated JSON line with keys: step, devices, requests, allModules
    Python replies with one JSON line: {"placement": {requestId: {module: deviceId}}}
 
-2. Results report  (Java → Python, sent once after CloudSim.stopSimulation())
+2. Step request  (Java → Python, PERIODIC scenario — PPO, sent every
+   MicroservicePlacementConfig.PLACEMENT_INTERVAL for the whole simulation,
+   not just once)
+   Single newline-terminated JSON line with key "type" == "step", keys:
+   step, simTime, done, reward, devices, modules
+   Python replies with one JSON line:
+   {"placements": [{"requestId":.., "module":.., "deviceId":..}, ...],
+    "migrations":  [{"requestId":.., "module":.., "toDeviceId":..}, ...]}
+
+3. Results report  (Java → Python, sent once after CloudSim.stopSimulation())
    Single newline-terminated JSON line with key "type" == "results"
    Python saves the payload to results/<agent>_<timestamp>.json and replies:
    {"status": "saved", "file": "<path>"}
@@ -22,6 +31,7 @@ Usage
 ─────
     python server.py                       # heuristic (default)
     python server.py --agent genetic
+    python server.py --agent ppo
     python server.py --host 0.0.0.0 --port 5555
 
 @author M-H-Boroumandnia
@@ -34,12 +44,13 @@ import socketserver
 import threading
 import time
 
-from agents import HeuristicAgent, GeneticAgent
+from agents import HeuristicAgent, GeneticAgent, PPOAgent
 
 
 AGENTS = {
     "heuristic": HeuristicAgent,
     "genetic":   GeneticAgent,
+    "ppo":       PPOAgent,
 }
 
 _agent      = None
@@ -63,6 +74,8 @@ class PlacementHandler(socketserver.StreamRequestHandler):
 
             if payload.get("type") == "results":
                 self._handle_results(payload)
+            elif payload.get("type") == "step":
+                self._handle_step(payload)
             else:
                 self._handle_placement(payload)
 
@@ -93,6 +106,41 @@ class PlacementHandler(socketserver.StreamRequestHandler):
                 dev_name = _device_name(state, dev_id)
                 print(f"  → req={req_id}  module={mod_name:<24}  device={dev_name}")
 
+    # ── PPO step request ──────────────────────────────────────────────────────
+
+    def _handle_step(self, state: dict):
+        """
+        One Gym-style step() exchange: Java sends the current state plus the
+        reward for the PREVIOUS action; Python replies with the next action
+        (new placements + migrations). Repeats every PLACEMENT_INTERVAL for
+        the whole simulation, so this prints sparsely to avoid flooding stdout.
+        """
+        step   = state.get("step", "?")
+        sim_t  = state.get("simTime", 0.0)
+        reward = state.get("reward", 0.0)
+        done   = state.get("done", False)
+
+        if step == 0 or done or (isinstance(step, int) and step % 50 == 0):
+            print(f"[Server] step={step:<5} simTime={sim_t:>7.1f}  "
+                  f"reward={reward:>10.4f}  done={done}")
+
+        decide_step = getattr(_agent, "decide_step", None)
+        if decide_step is None:
+            # Agent wasn't built for the step protocol (e.g. heuristic/genetic
+            # accidentally pointed at the PPO bridge) — reply with a safe no-op.
+            action = {"placements": [], "migrations": []}
+        else:
+            action = decide_step(state)
+
+        response_line = json.dumps(action) + "\n"
+        self.wfile.write(response_line.encode("utf-8"))
+        self.wfile.flush()
+
+        for p in action.get("placements", []):
+            print(f"  → place    req={p['requestId']}  {p['module']:<24} → device {p['deviceId']}")
+        for m in action.get("migrations", []):
+            print(f"  → migrate  req={m['requestId']}  {m['module']:<24} → device {m['toDeviceId']}")
+
     # ── Results report ────────────────────────────────────────────────────────
 
     def _handle_results(self, results: dict):
@@ -114,6 +162,8 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         print(f"  Total energy     : {results.get('totalEnergy', 0):,.1f} J")
         print(f"  Cloud cost       : {results.get('cloudCost', 0):,.1f}")
         print(f"  Requests placed  : {results.get('numRequests', '?')}")
+        if "migrationCount" in results:
+            print(f"  Service migrations: {results['migrationCount']}")
 
         if loop_delay is not None:
             print(f"  E2E loop delay   : {loop_delay:,.2f} ms  "
@@ -137,6 +187,21 @@ class PlacementHandler(socketserver.StreamRequestHandler):
         for p in results.get("placements", []):
             print(f"    step={p['step']}  req={p['requestId']}  "
                 f"{p['module']:<24} → {p['device']}")
+
+        migrations = results.get("migrations", [])
+        if migrations:
+            print("\n  Migrations:")
+            for m in migrations:
+                print(f"    step={m['step']}  req={m['requestId']}  "
+                      f"{m['module']:<24} {m['fromDevice']} → {m['toDevice']}")
+
+        step_rewards = results.get("stepRewards", [])
+        if step_rewards:
+            rewards = [s["reward"] for s in step_rewards]
+            print(f"\n  PPO step rewards ({len(rewards)} steps, for the convergence-curve plot):")
+            print(f"    first : {rewards[0]:>10.4f}")
+            print(f"    last  : {rewards[-1]:>10.4f}")
+            print(f"    mean  : {sum(rewards) / len(rewards):>10.4f}")
 
         mobility = results.get("mobility", {})
         if mobility:
