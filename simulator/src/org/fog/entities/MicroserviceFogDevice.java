@@ -329,7 +329,7 @@ public class MicroserviceFogDevice extends FogDevice {
 
         PlacementLogicOutput placementLogicOutput = getControllerComponent().executeApplicationPlacementLogic(placementRequests);
         long endTime = System.nanoTime();
-        System.out.println("Placement Algorithm Completed. Time : " + (endTime - startTime) / 1e6);
+//        System.out.println("Placement Algorithm Completed. Time : " + (endTime - startTime) / 1e6);
 
         Map<Integer, Map<Application, List<ModuleLaunchConfig>>> perDevice = placementLogicOutput.getPerDevice();
         Map<Integer, List<Pair<String, Integer>>> serviceDicovery = placementLogicOutput.getServiceDiscoveryInfo();
@@ -363,7 +363,7 @@ public class MicroserviceFogDevice extends FogDevice {
             }
             placementString.append("\n");
         }
-        System.out.println(placementString.toString());
+//        System.out.println(placementString.toString());
         for (int clientDevice : serviceDicovery.keySet()) {
             for (Pair serviceData : serviceDicovery.get(clientDevice)) {
                 if (MicroservicePlacementConfig.SIMULATION_MODE == "DYNAMIC") {
