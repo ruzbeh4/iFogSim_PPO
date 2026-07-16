@@ -23,6 +23,7 @@ public class Sensor extends SimEntity{
 	private String sensorName;
 	private String destModuleName;
 	private Distribution transmitDistribution;
+	private Distribution taskDeadlineDistribution;
 	private int controllerId;
 	private Application app;
 	private double latency;
@@ -90,6 +91,9 @@ public class Sensor extends SimEntity{
 
 		int actualTupleId = updateTimings(getSensorName(), tuple.getDestModuleName());
 		tuple.setActualTupleId(actualTupleId);
+		if (taskDeadlineDistribution != null)
+			TimeKeeper.getInstance().registerCriticalTask(actualTupleId,
+					taskDeadlineDistribution.getNextValue());
 		
 		send(gatewayDeviceId, getLatency(), FogEvents.TUPLE_ARRIVAL,tuple);
 	}
@@ -199,6 +203,11 @@ public class Sensor extends SimEntity{
 
 	public void setTransmitDistribution(Distribution transmitDistribution) {
 		this.transmitDistribution = transmitDistribution;
+	}
+
+	/** Optional per-emission deadline distribution used by QoS-aware workloads. */
+	public void setTaskDeadlineDistribution(Distribution taskDeadlineDistribution) {
+		this.taskDeadlineDistribution = taskDeadlineDistribution;
 	}
 
 	public int getControllerId() {

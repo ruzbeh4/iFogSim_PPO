@@ -17,13 +17,16 @@ import org.fog.entities.*;
 import org.fog.placement.MicroservicesController;
 import org.fog.placement.PlacementLogicFactory;
 import org.fog.placement.PPOBridgePlacementLogic;
+import org.fog.placement.SharedPolicyPPOBridgePlacementLogic;
 import org.fog.policy.AppModuleAllocationPolicy;
 import org.fog.scheduler.StreamOperatorScheduler;
 import org.fog.utils.FogLinearPowerModel;
 import org.fog.utils.FogUtils;
 import org.fog.utils.MicroservicePlacementConfig;
 import org.fog.utils.TimeKeeper;
+import org.fog.utils.TrainingLog;
 import org.fog.utils.distribution.SeededExponentialDistribution;
+import org.fog.utils.distribution.SeededUniformDistribution;
 
 import java.util.*;
 
@@ -40,22 +43,33 @@ public class IndustrialIoTSimulationTrain {
     static final String APP_ID = "industrial_iot";
     static Application application;
     static int e2eLoopId = -1;
+    static int criticalE2eLoopId = -1;
 
     // ── Topology Limits ──
-    static final int NUM_FOG_GATEWAYS    = 10;
-    static final int CLIENTS_PER_GATEWAY = 15;
+    static int NUM_FOG_GATEWAYS    = 10;
+    static int CLIENTS_PER_GATEWAY = 15;
     static final int CLOUD_MIPS  = 500_000;
-    static final int FOG_GW_MIPS = 15_000;
+    static int FOG_GW_MIPS = 15_000;
     static final int GW_TO_CLOUD_LATENCY = 100;
     static final int IOT_TO_GW_LATENCY   = 20;
-    static final double PERIODIC_MEAN_S = 5.0;
-    static final double CRITICAL_MEAN_S = 45.0;
+    // At the required 15+ fog / 150+ gadget scale, each fog gateway serves
+    // ten clients. This seeded workload retains a 1:9 critical/normal mix
+    // while keeping the serial service queues below saturation.
+    static final double PERIODIC_MEAN_S = 25.0;
+    static final double CRITICAL_MEAN_S = 225.0;
+	// Industrial-control latency budget: seeded per critical event, not a
+	// launcher setting. This creates mixed tight/relaxed critical workloads.
+	static final double CRITICAL_DEADLINE_MIN_MS = 300.0;
+	static final double CRITICAL_DEADLINE_MAX_MS = 500.0;
 
     // Dynamic Seeds (set in main)
     static long SEED_SELECTIVITY;
     static long SEED_TRAFFIC;
     static long SEED_DEVICE_TYPE;
     static long SEED_MOBILITY;
+    static double MOBILE_SHARE = 0.66;
+    static boolean SHARED_POLICY = false;
+    static long EPISODE_SEED = 1L;
 
     public static void main(String[] args) {
         long episodeSeed = 1L;
@@ -63,12 +77,51 @@ public class IndustrialIoTSimulationTrain {
             try { episodeSeed = Long.parseLong(args[0]); } catch (Exception e) {}
         }
 
-        System.out.println("Starting Training Episode: " + episodeSeed);
+        EPISODE_SEED = episodeSeed;
+        SHARED_POLICY = Boolean.getBoolean("ifogsim.shared.policy");
+        if (SHARED_POLICY) TrainingLog.configure();
+        System.setProperty("ifogsim.episode.seed", Long.toString(episodeSeed));
+        System.out.println("Starting Training Episode: " + episodeSeed
+                + (SHARED_POLICY ? " (shared service policy)" : ""));
 
-        SEED_SELECTIVITY = episodeSeed * 101L;
-        SEED_TRAFFIC     = episodeSeed * 202L;
-        SEED_DEVICE_TYPE = episodeSeed * 404L;
-        SEED_MOBILITY    = episodeSeed * 303L;
+        if (SHARED_POLICY) {
+            SplittableRandom seedStream = new SplittableRandom(episodeSeed);
+            SEED_SELECTIVITY = seedStream.nextLong();
+            SEED_TRAFFIC     = seedStream.nextLong();
+            SEED_DEVICE_TYPE = seedStream.nextLong();
+            SEED_MOBILITY    = seedStream.nextLong();
+            // Domain randomisation: topology size, mobile share, capacity and
+            // traffic/selectivity all change reproducibly with episodeSeed.
+            // Assignment-scale topology: 15–16 fog gateways and 150–160
+            // gadgets. The seed still randomizes the gateway count, mobility,
+            // capacity and workload characteristics from episode to episode.
+            NUM_FOG_GATEWAYS = 15 + seedStream.nextInt(2);      // 15..16
+            CLIENTS_PER_GATEWAY = 10;                            // 150..160 total
+            MOBILE_SHARE = 0.40 + seedStream.nextDouble() * 0.40;
+			// A gateway serves CLIENTS_PER_GATEWAY requests. The placement layer
+			// reserves 500 + 2000 + 800 MIPS when all services are local, so the
+			// old fixed 18–24k gateway was structurally unable to host its own
+			// workload (10–18 requests) and forced chronic cloud queues. Size the
+			// gateway from the seeded topology and retain 20% migration headroom.
+			FOG_GW_MIPS = Math.max(30_000, (int) Math.ceil(
+					CLIENTS_PER_GATEWAY * 3_300.0 * 1.20));
+            MicroservicePlacementConfig.PLACEMENT_INTERVAL =
+                    Double.parseDouble(System.getProperty("ifogsim.placement.interval", "10"));
+            org.fog.utils.Config.MAX_SIMULATION_TIME =
+                    Integer.getInteger("ifogsim.simulation.time", 600);
+            SharedPolicyPPOBridgePlacementLogic.clearSharedLogs();
+            System.out.println("Training topology: gateways=" + NUM_FOG_GATEWAYS
+                    + ", clients=" + (NUM_FOG_GATEWAYS * CLIENTS_PER_GATEWAY)
+                    + ", mobileShare=" + String.format(Locale.ROOT, "%.2f", MOBILE_SHARE)
+                    + ", fogMips=" + FOG_GW_MIPS);
+        } else {
+            // Preserve the original training entry's seed mapping.
+            SEED_SELECTIVITY = episodeSeed * 101L;
+            SEED_TRAFFIC     = episodeSeed * 202L;
+            SEED_DEVICE_TYPE = episodeSeed * 404L;
+            SEED_MOBILITY    = episodeSeed * 303L;
+            PPOBridgePlacementLogic.clearLogs();
+        }
 
         try {
             Log.disable();
@@ -96,11 +149,17 @@ public class IndustrialIoTSimulationTrain {
 
             MicroservicesController controller = new MicroservicesController(
                     "industrial-controller", fogDevices, sensors, Arrays.asList(app),
-                    new ArrayList<>(), 2.0, PlacementLogicFactory.PPO_BRIDGE_PLACEMENT, monitored);
+                    new ArrayList<>(), 2.0,
+                    SHARED_POLICY ? PlacementLogicFactory.SHARED_PPO_BRIDGE_PLACEMENT
+                            : PlacementLogicFactory.PPO_BRIDGE_PLACEMENT,
+                    monitored);
 
             List<PlacementRequest> placementRequests = new ArrayList<>();
             for (FogDevice dev : fogDevices) {
                 if (((MicroserviceFogDevice) dev).getDeviceType().equals(MicroserviceFogDevice.CLIENT)) {
+                    // Preserve the existing GA initialization schema: the local
+                    // preprocessor starts on its client. It is still included in
+                    // the shared PPO actor set and may migrate on later steps.
                     Map<String, Integer> prePlaced = new HashMap<>();
                     prePlaced.put("data_preprocessor", dev.getId());
                     placementRequests.add(new PlacementRequest(APP_ID, dev.getId(), dev.getId(), prePlaced));
@@ -115,7 +174,8 @@ public class IndustrialIoTSimulationTrain {
 
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
                     sendResultsToPython(fogDevices, PPOBridgePlacementLogic.PLACEMENT_LOG,
-                            PPOBridgePlacementLogic.DEFAULT_HOST, PPOBridgePlacementLogic.DEFAULT_PORT)
+                            System.getProperty("ifogsim.bridge.host", PPOBridgePlacementLogic.DEFAULT_HOST),
+                            Integer.getInteger("ifogsim.bridge.port", PPOBridgePlacementLogic.DEFAULT_PORT))
             ));
 
             CloudSim.startSimulation();
@@ -138,7 +198,7 @@ public class IndustrialIoTSimulationTrain {
             fogDevices.add(gw);
 
             for (int j = 0; j < CLIENTS_PER_GATEWAY; j++) {
-                boolean isMobile = typeRandom.nextDouble() < 0.66;
+                boolean isMobile = typeRandom.nextDouble() < MOBILE_SHARE;
                 String deviceName = (isMobile ? "MobileRobot-" : "FixedSensor-") + i + "-" + j;
                 addIoTClient(userId, deviceName, gw.getId());
             }
@@ -160,11 +220,14 @@ public class IndustrialIoTSimulationTrain {
         periodicSensor.setApp(application);
         sensors.add(periodicSensor);
 
-        Sensor criticalSensor = new Sensor("sensor-critical-" + deviceName, "IoT_SENSOR", userId, APP_ID,
+        Sensor criticalSensor = new Sensor("sensor-critical-" + deviceName, "CRITICAL_IOT_SENSOR", userId, APP_ID,
                 new SeededExponentialDistribution(CRITICAL_MEAN_S, deviceTrafficSeed + 1000));
         criticalSensor.setGatewayDeviceId(iotDevice.getId());
         criticalSensor.setLatency(1.0);
         criticalSensor.setApp(application);
+		criticalSensor.setTaskDeadlineDistribution(new SeededUniformDistribution(
+				CRITICAL_DEADLINE_MIN_MS, CRITICAL_DEADLINE_MAX_MS,
+				SEED_TRAFFIC + 10_000L + iotDevice.getId()));
         sensors.add(criticalSensor);
 
         Actuator actuator = new Actuator("actuator-" + deviceName, userId, APP_ID, "ACTUATOR");
@@ -195,19 +258,25 @@ public class IndustrialIoTSimulationTrain {
         app.addAppModule("actuator_controller", 256,  800, 300);
 
         app.addAppEdge("IoT_SENSOR", "data_preprocessor", 2000, 500, "IoT_SENSOR", Tuple.UP, AppEdge.SENSOR);
+        app.addAppEdge("CRITICAL_IOT_SENSOR", "data_preprocessor", 2000, 500,
+                "CRITICAL_IOT_SENSOR", Tuple.UP, AppEdge.SENSOR);
         app.addAppEdge("data_preprocessor", "smart_analyzer", 3500, 500, "FILTERED_DATA", Tuple.UP, AppEdge.MODULE);
         app.addAppEdge("smart_analyzer", "actuator_controller", 100, 1000, "ANALYSIS_RESULT", Tuple.UP, AppEdge.MODULE);
         app.addAppEdge("actuator_controller", "data_preprocessor", 14, 500, "CONTROL_CMD", Tuple.DOWN, AppEdge.MODULE);
         app.addAppEdge("data_preprocessor", "ACTUATOR", 1000, 500, "ACTUATOR_CMD", Tuple.DOWN, AppEdge.ACTUATOR);
 
         app.addTupleMapping("data_preprocessor", "IoT_SENSOR", "FILTERED_DATA", new SeededSelectivity(0.8, SEED_SELECTIVITY));
+        app.addTupleMapping("data_preprocessor", "CRITICAL_IOT_SENSOR", "FILTERED_DATA",
+                new SeededSelectivity(0.8, SEED_SELECTIVITY + 1));
         app.addTupleMapping("smart_analyzer", "FILTERED_DATA", "ANALYSIS_RESULT", new FractionalSelectivity(1.0));
         app.addTupleMapping("actuator_controller", "ANALYSIS_RESULT", "CONTROL_CMD", new FractionalSelectivity(1.0));
         app.addTupleMapping("data_preprocessor", "CONTROL_CMD", "ACTUATOR_CMD", new FractionalSelectivity(1.0));
 
         final AppLoop e2eLoop = new AppLoop(new ArrayList<String>() {{ add("IoT_SENSOR"); add("data_preprocessor"); add("smart_analyzer"); add("actuator_controller"); add("data_preprocessor"); add("ACTUATOR"); }});
-        app.setLoops(new ArrayList<AppLoop>() {{ add(e2eLoop); }});
+        final AppLoop criticalE2eLoop = new AppLoop(new ArrayList<String>() {{ add("CRITICAL_IOT_SENSOR"); add("data_preprocessor"); add("smart_analyzer"); add("actuator_controller"); add("data_preprocessor"); add("ACTUATOR"); }});
+        app.setLoops(new ArrayList<AppLoop>() {{ add(e2eLoop); add(criticalE2eLoop); }});
         e2eLoopId = e2eLoop.getLoopId();
+        criticalE2eLoopId = criticalE2eLoop.getLoopId();
         app.createDAG();
         return app;
     }
@@ -224,7 +293,13 @@ public class IndustrialIoTSimulationTrain {
 
         // ---- Full results (same as IndustrialIoTSimulation4) ----
         try (java.net.Socket socket = new java.net.Socket(host, port)) {
-            socket.setSoTimeout(15_000);
+			TimeKeeper.getInstance().finalizeCriticalTasks();
+            // A shared PPO update/checkpoint runs synchronously on Python after
+            // this message. It can legitimately take longer than the legacy
+            // bridge's 15-second result acknowledgement timeout.
+            socket.setSoTimeout(SHARED_POLICY
+                    ? Integer.getInteger("ifogsim.results.timeout.ms", 180_000)
+                    : 15_000);
             java.io.PrintWriter out = new java.io.PrintWriter(
                     new java.io.OutputStreamWriter(socket.getOutputStream(), "UTF-8"), true);
             java.io.BufferedReader in = new java.io.BufferedReader(
@@ -233,6 +308,7 @@ public class IndustrialIoTSimulationTrain {
             StringBuilder sb = new StringBuilder();
             sb.append("{");
             sb.append("\"type\":\"results\",");
+            sb.append("\"episodeSeed\":").append(EPISODE_SEED).append(",");
             sb.append("\"simulationTime\":").append(org.cloudbus.cloudsim.core.CloudSim.clock()).append(",");
 
             double totalEnergy = 0;
@@ -256,11 +332,42 @@ public class IndustrialIoTSimulationTrain {
             double cloudCost = (cloud != null) ? cloud.getTotalCost() : 0.0;
             sb.append("\"cloudCost\":").append(cloudCost).append(",");
 
-            Double loopDelay = TimeKeeper.getInstance().getLoopIdToCurrentAverage().get(e2eLoopId);
-            sb.append("\"loopDelay\":").append(loopDelay != null ? loopDelay : "null").append(",");
+            Double normalLoopDelay = TimeKeeper.getInstance().getLoopIdToCurrentAverage().get(e2eLoopId);
+            Double criticalLoopDelay = TimeKeeper.getInstance().getLoopIdToCurrentAverage().get(criticalE2eLoopId);
+            int normalSamples = TimeKeeper.getInstance().getLoopIdToCurrentNum().getOrDefault(e2eLoopId, 0);
+            int criticalSamples = TimeKeeper.getInstance().getLoopIdToCurrentNum().getOrDefault(criticalE2eLoopId, 0);
+            int completedSamples = normalSamples + criticalSamples;
+            Double averageLatency = completedSamples == 0 ? null
+                    : ((normalLoopDelay == null ? 0.0 : normalLoopDelay * normalSamples)
+                    + (criticalLoopDelay == null ? 0.0 : criticalLoopDelay * criticalSamples)) / completedSamples;
+            // loopDelay is retained for existing consumers and now means the
+            // completed-task weighted average latency across both task classes.
+            sb.append("\"loopDelay\":").append(averageLatency != null ? averageLatency : "null").append(",");
+            sb.append("\"averageLatency\":").append(averageLatency != null ? averageLatency : "null").append(",");
+            sb.append("\"normalLoopDelay\":").append(normalLoopDelay != null ? normalLoopDelay : "null").append(",");
+            sb.append("\"criticalLoopDelay\":").append(criticalLoopDelay != null ? criticalLoopDelay : "null").append(",");
+            sb.append("\"loopSampleCount\":").append(completedSamples).append(",");
 
-            Integer loopSampleCount = TimeKeeper.getInstance().getLoopIdToCurrentNum().get(e2eLoopId);
-            sb.append("\"loopSampleCount\":").append(loopSampleCount != null ? loopSampleCount : 0).append(",");
+            int criticalTasks = TimeKeeper.getInstance().getCriticalTasksEmitted();
+            int criticalTasksOnTime = TimeKeeper.getInstance().getCriticalTasksOnTime();
+            int criticalTasksMissed = TimeKeeper.getInstance().getCriticalTasksMissed();
+			int criticalTasksPending = TimeKeeper.getInstance().getCriticalTasksPending();
+			int criticalTasksEvaluated = criticalTasksOnTime + criticalTasksMissed;
+            double criticalSuccessRate = criticalTasksEvaluated == 0 ? 0.0
+                    : (double) criticalTasksOnTime / criticalTasksEvaluated;
+			sb.append("\"criticalDeadlineMeanMs\":")
+					.append(TimeKeeper.getInstance().getCriticalDeadlineMeanMs()).append(",");
+            sb.append("\"criticalTasks\":").append(criticalTasks).append(",");
+            sb.append("\"criticalTasksOnTime\":").append(criticalTasksOnTime).append(",");
+            sb.append("\"criticalTasksMissed\":").append(criticalTasksMissed).append(",");
+			sb.append("\"criticalTasksPending\":").append(criticalTasksPending).append(",");
+			sb.append("\"criticalTasksEvaluated\":").append(criticalTasksEvaluated).append(",");
+            sb.append("\"criticalDeadlineSuccessRate\":").append(criticalSuccessRate).append(",");
+
+            double meanReward = SharedPolicyPPOBridgePlacementLogic.ACTOR_REWARD_COUNT == 0
+                    ? 0.0 : SharedPolicyPPOBridgePlacementLogic.ACTOR_REWARD_SUM
+                    / SharedPolicyPPOBridgePlacementLogic.ACTOR_REWARD_COUNT;
+            sb.append("\"meanLocalReward\":").append(meanReward).append(",");
 
             sb.append("\"tupleCpuDelays\":{");
             boolean firstTupleType = true;
@@ -293,6 +400,12 @@ public class IndustrialIoTSimulationTrain {
             sb.append("],");
 
             sb.append("\"migrationCount\":").append(PPOBridgePlacementLogic.MIGRATION_LOG.size()).append(",");
+            sb.append("\"acceptedMigrations\":")
+                    .append(SHARED_POLICY ? SharedPolicyPPOBridgePlacementLogic.ACCEPTED_MIGRATIONS
+                            : PPOBridgePlacementLogic.MIGRATION_LOG.size()).append(",");
+            sb.append("\"rejectedMigrations\":")
+                    .append(SHARED_POLICY ? SharedPolicyPPOBridgePlacementLogic.REJECTED_MIGRATIONS : 0)
+                    .append(",");
             sb.append("\"migrations\":[");
             boolean firstMig = true;
             for (Map<String, Object> entry : PPOBridgePlacementLogic.MIGRATION_LOG) {
@@ -323,6 +436,20 @@ public class IndustrialIoTSimulationTrain {
             sb.append("]}");
 
             out.println(sb.toString());
+
+            if (SHARED_POLICY) {
+                TrainingLog.episodeSummary(EPISODE_SEED,
+                        org.cloudbus.cloudsim.core.CloudSim.clock(), totalEnergy, cloudCost,
+                        averageLatency, meanReward, placementLog.size(),
+                        SharedPolicyPPOBridgePlacementLogic.ACCEPTED_MIGRATIONS,
+                        SharedPolicyPPOBridgePlacementLogic.REJECTED_MIGRATIONS,
+						criticalTasks, criticalTasksEvaluated, criticalTasksPending,
+						criticalTasksMissed, criticalSuccessRate);
+            }
+
+            // Wait for Python only after the simulator-side report is visible.
+            // This preserves a useful trajectory report even if Python later
+            // fails while updating or saving a checkpoint.
             in.readLine();
 
         } catch (Exception e) {

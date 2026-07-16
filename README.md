@@ -195,3 +195,133 @@ Run: `python server.py --agent ppo`
  * Redowan Mahmud, Samodha Pallewatta, Mohammad Goudarzi, and Rajkumar Buyya, <A href="https://arxiv.org/abs/2109.05636">iFogSim2: An Extended iFogSim Simulator for Mobility, Clustering, and Microservice Management in Edge and Fog Computing Environments</A>, Journal of Systems and Software (JSS), Volume 190, Pages: 1-17, ISSN:0164-1212, Elsevier Press, Amsterdam, The Netherlands, August 2022.
  * Harshit Gupta, Amir Vahid Dastjerdi , Soumya K. Ghosh, and Rajkumar Buyya, <A href="http://www.buyya.com/papers/iFogSim.pdf">iFogSim: A Toolkit for Modeling and Simulation of Resource Management Techniques in Internet of Things, Edge and Fog Computing Environments</A>, Software: Practice and Experience (SPE), Volume 47, Issue 9, Pages: 1275-1296, ISSN: 0038-0644, Wiley Press, New York, USA, September 2017.
  * Redowan Mahmud and Rajkumar Buyya, <A href="http://www.buyya.com/papers/iFogSim-Tut.pdf">Modelling and Simulation of Fog and Edge Computing Environments using iFogSim Toolkit</A>, Fog and Edge Computing: Principles and Paradigms, R. Buyya and S. Srirama (eds), 433-466pp, ISBN: 978-111-95-2498-4, Wiley Press, New York, USA, January 2019.
+
+---
+
+## Revised shared-policy PPO training
+
+The original PPO experiment remains available, but its policy consumes every
+movable service in one fixed vector and chooses one global `(service, device)`
+pair. The revised training path is separate and does not change the existing
+`server.py` / `IndustrialIoTSimulation4` inference path.
+
+New entry points:
+
+- `agents/shared_train_server.py` - persistent GA + shared PPO server
+- `agents/agents/shared_ppo.py` - variable-size candidate-scoring actor/critic
+- `SharedPolicyPPOBridgePlacementLogic.java` - revised simulator protocol
+- `train.sh` and `train_windows.ps1` - compile, start the server, and run episodes
+
+Run on Linux/macOS:
+
+```bash
+bash train.sh --episodes 200 --start-seed 1
+```
+
+Run on Windows PowerShell:
+
+```powershell
+.\train_windows.ps1 -Episodes 200 -StartSeed 1
+```
+
+Both launchers accept a port, simulation duration, placement interval, and
+maximum migrations per step. They compile Java sources automatically unless
+`--skip-compile` / `-SkipCompile` is supplied. The model is written to
+`agents/models/shared_ppo_model.pth`; convergence data is written to
+`agents/results/shared_ppo_convergence.json`.
+
+The shared-policy mode is enabled by the launcher with
+`-Difogsim.shared.policy=true`; it does not require a second Java entry class.
+Critical requests are a seeded exponential arrival stream (mean 225 s per
+client, alongside normal requests with mean 25 s). Each critical request gets a
+seeded 300–500 ms per-task deadline inside the Industrial IoT scenario; it is
+not a launcher parameter. Completion is recorded through iFogSim's loop timing
+and QoS-success accounting. At simulation cutoff, only overdue unfinished
+critical tasks count as misses; non-expired tasks are recorded as pending.
+
+Plot a saved convergence history with:
+
+```powershell
+python agents\plot_shared_training.py
+```
+
+### Training terminal output
+
+The shared-policy launcher keeps the terminal compact by default: it prints a
+two-line trajectory summary containing energy, cloud cost, loop delay, mean
+local actor reward, GA placements, and accepted/rejected PPO migrations.
+
+On PowerShell, the independent controls are:
+
+```powershell
+# Print every successful GA placement and PPO migration as well.
+.\train_windows.ps1 -ShowSuccessfulDecisions $true
+
+# Restore all legacy simulator diagnostics, including routing and placement maps.
+.\train_windows.ps1 -ShowSimulatorDiagnostics $true
+
+# Print Python bridge/PPO progress messages.
+.\train_windows.ps1 -ShowPythonProgress $true
+
+# Suppress even the per-trajectory summary.
+.\train_windows.ps1 -ShowEpisodeSummary $false
+```
+
+The Bash equivalents are `--show-successful-decisions`,
+`--simulator-diagnostics`, `--python-progress`, and `--no-episode-summary`.
+
+### Checkpoint control
+
+Training resumes and fine-tunes the selected model by default. Use a distinct
+model/history pair to keep experiments separate:
+
+```powershell
+.\train_windows.ps1 `
+  -ModelPath agents\models\experiment_a.pth `
+  -ConvergencePath agents\results\experiment_a.json
+```
+
+Use `-ResetTraining` only when intentionally starting a fresh experiment. It
+deletes exactly the selected model and convergence JSON before the server
+starts; it does not delete the per-episode result files.
+
+```powershell
+.\train_windows.ps1 -ResetTraining
+```
+
+The Bash equivalents are `--model`, `--convergence`, and `--reset-training`.
+
+### Protocol and learning unit
+
+Step zero sends the original `devices`, `requests`, and `allModules` placement
+schema to Python. Python calls the existing `GeneticAgent` unchanged and
+returns its initial placement. The preprocessor starts on its client exactly as
+in the existing GA setup, but is also an actor and may migrate later. Later
+messages use `type: shared_step` and carry a bounded round-robin service batch
+(32 actors per step by default; `-MaxActorsPerStep` / `--max-actors-per-step`).
+
+Every service actor has:
+
+- its module type and resource demand;
+- its current node, home gateway, peer-service relationship, and client type;
+- a variable candidate list with free CPU/RAM, utilization, node energy delta,
+  estimated request latency, locality flags, and an exact feasibility mask;
+- a local reward split into attributed host energy, request-specific delay,
+  and migration/rejection penalty components.
+
+The same candidate-scoring network is used for every service and every fog
+node. Candidate masks and within-batch CPU reservations prevent the policy from
+sampling destinations that cannot accept a service. The simulator still
+performs a final capacity check.
+
+Training episodes domain-randomize the number of gateways, client count,
+mobile/static share, fog capacity, traffic, and selectivity from the episode
+seed. A given seed is reproducible. For a controlled PPO/no-PPO comparison,
+run the same seed and model in inference mode, setting `--max-migrations 0` for
+the no-migration baseline; the GA initialization is identical in both runs.
+
+Each new episode record also includes average end-to-end latency, separate
+normal/critical latency, critical tasks emitted/on-time/missed, the critical
+deadline success rate, pending/evaluated critical tasks, immediate mean local reward, and accepted/rejected
+migrations. `meanTdTarget` is only a PPO value-learning diagnostic; it is not
+the simulator reward.

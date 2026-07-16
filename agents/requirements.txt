@@ -14,5 +14,5 @@
 #
 # Python version: 3.10+ (uses X | Y union types in type hints)
 #
-# If you want to add PPO later, install:
-#   pip install torch numpy gymnasium
+# Shared-policy PPO training requirements:
+#   pip install torch numpy matplotlib

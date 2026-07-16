@@ -761,7 +761,10 @@ public class FogDevice extends PowerDatacenter {
         String destModule = tuple.getDestModuleName();
         List<AppLoop> loops = app.getLoops();
         for (AppLoop loop : loops) {
-            if (loop.hasEdge(srcModule, destModule) && loop.isEndModule(destModule)) {
+            if (loop.hasEdge(srcModule, destModule) && loop.isEndModule(destModule)
+                    && TimeKeeper.getInstance().getLoopIdToTupleIds()
+                    .getOrDefault(loop.getLoopId(), java.util.Collections.emptyList())
+                    .contains(tuple.getActualTupleId())) {
                 Double startTime = TimeKeeper.getInstance().getEmitTimes().get(tuple.getActualTupleId());
                 if (startTime == null)
                     break;
@@ -776,6 +779,9 @@ public class FogDevice extends PowerDatacenter {
                 double newAverage = (currentAverage * currentCount + delay) / (currentCount + 1);
                 TimeKeeper.getInstance().getLoopIdToCurrentAverage().put(loop.getLoopId(), newAverage);
                 TimeKeeper.getInstance().getLoopIdToCurrentNum().put(loop.getLoopId(), currentCount + 1);
+				TimeKeeper.getInstance().getLoopIdToTupleIds().get(loop.getLoopId())
+						.remove(Integer.valueOf(tuple.getActualTupleId()));
+				TimeKeeper.getInstance().recordLoopCompletion(tuple.getActualTupleId(), loop.getLoopId(), delay);
                 break;
             }
         }

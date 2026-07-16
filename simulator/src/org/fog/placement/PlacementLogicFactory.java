@@ -18,6 +18,8 @@ public class PlacementLogicFactory {
      * MicroservicePlacementConfig.PLACEMENT_INTERVAL) instead of once at time 0.
      */
     public static final int PPO_BRIDGE_PLACEMENT = 5;
+    /** Shared service-level PPO bridge with local rewards and masked actions. */
+    public static final int SHARED_PPO_BRIDGE_PLACEMENT = 6;
 
     public MicroservicePlacementLogic getPlacementLogic(int logic, int fonId) {
         switch (logic) {
@@ -31,6 +33,8 @@ public class PlacementLogicFactory {
                 return new PythonBridgePlacementLogic(fonId);
             case PPO_BRIDGE_PLACEMENT:
                 return new PPOBridgePlacementLogic(fonId);
+            case SHARED_PPO_BRIDGE_PLACEMENT:
+                return new SharedPolicyPPOBridgePlacementLogic(fonId);
         }
 
         Logger.error("Placement Logic Error", "Error initializing placement logic");

@@ -1,113 +1,134 @@
-<#
-.SYNOPSIS
-    Automated PPO training loop on Windows – with robust server startup.
-#>
-
-param (
-    [int]$episodes = 200,
-    [string]$agent = "ppo_train",
-    [int]$port = 5555
+<# Revised GA + shared-service PPO training launcher. #>
+param(
+    [int]$Episodes = 200,
+    [long]$StartSeed = 1,
+    [int]$Port = 5555,
+    [int]$MaxMigrations = 2,
+	[int]$MaxActorsPerStep = 32,
+    [int]$SimulationTime = 1200,
+    [double]$PlacementInterval = 10,
+    [bool]$ShowEpisodeSummary = $true,
+    [bool]$ShowSuccessfulDecisions = $false,
+    [bool]$ShowSimulatorDiagnostics = $false,
+    [bool]$ShowPythonProgress = $false,
+    [string]$ModelPath = "agents\models\shared_ppo_model.pth",
+    [string]$ConvergencePath = "agents\results\shared_ppo_convergence.json",
+    [switch]$ResetTraining,
+    [switch]$SkipCompile
 )
 
-# ── Java 21 path (adjust if needed) ──
-$JAVA_EXE = "C:\Users\ruzbeh\.jdks\ms-21.0.11\bin\java.exe"
+$ErrorActionPreference = "Stop"
+$Root = $PSScriptRoot
+$Simulator = Join-Path $Root "simulator"
+$Agents = Join-Path $Root "agents"
+$BuildDir = Join-Path $Simulator "out\shared_policy\classes"
+$SourceList = Join-Path $Simulator "out\shared_policy\sources.txt"
+$Jars = Join-Path $Simulator "jars"
+$MainClass = "org.fog.test.perfeval.IndustrialIoTSimulationTrain"
 
-# ── Project layout ──
-$ROOT = $PSScriptRoot
-$AGENTS_DIR  = Join-Path $ROOT "agents"
-$SIM_DIR     = Join-Path $ROOT "simulator"
-$CLASSES_DIR = Join-Path $SIM_DIR "out\production\simulator"
-$JARS_DIR    = Join-Path $SIM_DIR "jars"
-$MAIN_CLASS  = "org.fog.test.perfeval.IndustrialIoTSimulationTrain"
-
-# ── Validation ──
-if (-Not (Test-Path $CLASSES_DIR)) {
-    Write-Host "[ERROR] Compiled classes not found at $CLASSES_DIR" -ForegroundColor Red
-    exit 1
-}
-if (-Not (Test-Path $JAVA_EXE)) {
-    Write-Host "[ERROR] Java 21 not found at $JAVA_EXE" -ForegroundColor Red
-    exit 1
-}
-
-$CP = "$CLASSES_DIR;$JARS_DIR\*"
-
-# ── Helper: Check if port is open ──
-function Test-Port {
-    param($hostname = "localhost", $port)
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect($hostname, $port)
-        $tcp.Close()
-        return $true
-    } catch {
-        return $false
+$JavaCommand = Get-Command java -ErrorAction SilentlyContinue
+$JavacCommand = Get-Command javac -ErrorAction SilentlyContinue
+if ($JavaCommand -and $JavacCommand) {
+    $Java = $JavaCommand.Source
+    $Javac = $JavacCommand.Source
+} else {
+    $Javac = Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE ".jdks") `
+        -Recurse -Filter "javac.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if (-not $Javac) {
+        throw "A JDK was not found on PATH or under $env:USERPROFILE\.jdks."
     }
+    $Java = Join-Path (Split-Path $Javac) "java.exe"
+}
+$VenvPython = Join-Path $Agents "venv\Scripts\python.exe"
+$Python = if (Test-Path -LiteralPath $VenvPython) {
+    $VenvPython
+} else {
+    (Get-Command python -ErrorAction Stop).Source
 }
 
-# ── Start Python server ──
-Write-Host "=========================================================="
-Write-Host " Launching Python Train Server (Agent: $agent)"
-Write-Host "=========================================================="
-
-$serverArgs = @("$AGENTS_DIR\train_server.py", "--agent", $agent, "--port", $port)
-$serverProcess = Start-Process -FilePath "python" -ArgumentList $serverArgs -PassThru -NoNewWindow -RedirectStandardOutput "$AGENTS_DIR\server_stdout.log" -RedirectStandardError "$AGENTS_DIR\server_stderr.log"
-
-# Wait for server to be ready (max 15 seconds)
-$maxAttempts = 30
-$attempt = 0
-$ready = $false
-Write-Host "Waiting for server to bind to port $port..."
-while ($attempt -lt $maxAttempts) {
-    Start-Sleep -Milliseconds 500
-    $attempt++
-    if (Test-Port -port $port) {
-        $ready = $true
-        break
-    }
-    # Check if the process has exited
-    if ($serverProcess.HasExited) {
-        Write-Host "[ERROR] Python server exited prematurely. Check $AGENTS_DIR\server_stderr.log" -ForegroundColor Red
-        Get-Content "$AGENTS_DIR\server_stderr.log" -ErrorAction SilentlyContinue
-        exit 1
-    }
+if ([string]::IsNullOrWhiteSpace($ModelPath)) {
+    $ModelPath = Join-Path $Agents "models\shared_ppo_model.pth"
+} elseif (-not [System.IO.Path]::IsPathRooted($ModelPath)) {
+    $ModelPath = Join-Path $Root $ModelPath
+}
+if ([string]::IsNullOrWhiteSpace($ConvergencePath)) {
+    $ConvergencePath = Join-Path $Agents "results\shared_ppo_convergence.json"
+} elseif (-not [System.IO.Path]::IsPathRooted($ConvergencePath)) {
+    $ConvergencePath = Join-Path $Root $ConvergencePath
 }
 
-if (-not $ready) {
-    Write-Host "[ERROR] Server did not become ready within 15 seconds." -ForegroundColor Red
-    if ($serverProcess -and -Not $serverProcess.HasExited) {
-        Stop-Process -Id $serverProcess.Id -Force
-    }
-    exit 1
-}
-
-Write-Host "[OK] Server is ready on port $port."
-
-# ── Training loop ──
-Write-Host "=========================================================="
-Write-Host " Commencing Training Loop: $episodes Episodes"
-Write-Host "=========================================================="
-
-try {
-    for ($i = 1; $i -le $episodes; $i++) {
-        Write-Host "`n>>> Episode $i / $episodes <<<" -ForegroundColor Cyan
-        $javaArgs = @("-cp", $CP, $MAIN_CLASS, $i)
-        $proc = Start-Process -FilePath $JAVA_EXE -ArgumentList $javaArgs -Wait -NoNewWindow -PassThru
-        if ($proc.ExitCode -ne 0) {
-            Write-Host "Episode $i exited with code $($proc.ExitCode)." -ForegroundColor Yellow
+if ($ResetTraining) {
+    foreach ($Path in @($ModelPath, $ConvergencePath)) {
+        if (Test-Path -LiteralPath $Path) {
+            Remove-Item -LiteralPath $Path -Force
+            Write-Host "[train_windows] Reset: removed $Path" -ForegroundColor Yellow
         }
-        Start-Sleep -Seconds 1   # allow socket cleanup between runs
     }
-    Write-Host "`nTraining Complete! Check agents\results\convergence.json" -ForegroundColor Green
+}
+
+if (-not $SkipCompile) {
+    Write-Host "[train_windows] Compiling simulator..."
+    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    New-Item -ItemType Directory -Force -Path (Split-Path $SourceList) | Out-Null
+    $Sources = Get-ChildItem -LiteralPath (Join-Path $Simulator "src") -Recurse -Filter "*.java" |
+        ForEach-Object { $_.FullName }
+    [System.IO.File]::WriteAllLines(
+        $SourceList, $Sources, [System.Text.UTF8Encoding]::new($false))
+    & $Javac -encoding UTF-8 -cp "$Jars\*" -d $BuildDir "@$SourceList"
+    if ($LASTEXITCODE -ne 0) { throw "javac failed with exit code $LASTEXITCODE" }
+}
+
+$Server = $null
+try {
+    $ServerArgs = @(
+        "-u", (Join-Path $Agents "shared_train_server.py"),
+        "--port", $Port,
+        "--max-migrations", $MaxMigrations,
+        "--model", $ModelPath,
+        "--convergence", $ConvergencePath
+    )
+    if ($ShowPythonProgress) { $ServerArgs += "--progress" }
+    $Server = Start-Process -FilePath $Python -ArgumentList $ServerArgs -PassThru -NoNewWindow
+
+    $Ready = $false
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 250
+        if ($Server.HasExited) { throw "Training server exited during startup." }
+        try {
+            $Client = [System.Net.Sockets.TcpClient]::new()
+            $Client.Connect("localhost", $Port)
+            $Client.Dispose()
+            $Ready = $true
+            break
+        } catch { }
+    }
+    if (-not $Ready) { throw "Training server did not bind to port $Port." }
+
+    $Classpath = "$BuildDir;$Jars\*"
+    $SummaryValue = $ShowEpisodeSummary.ToString().ToLowerInvariant()
+    $DecisionValue = $ShowSuccessfulDecisions.ToString().ToLowerInvariant()
+    $DiagnosticValue = $ShowSimulatorDiagnostics.ToString().ToLowerInvariant()
+    for ($index = 0; $index -lt $Episodes; $index++) {
+        $Seed = $StartSeed + $index
+        Write-Host "[train_windows] Episode $($index + 1)/$Episodes (seed=$Seed)" -ForegroundColor Cyan
+        $JavaArgs = @(
+			"-Difogsim.shared.policy=true",
+            "-Difogsim.bridge.port=$Port",
+            "-Difogsim.simulation.time=$SimulationTime",
+            "-Difogsim.placement.interval=$PlacementInterval",
+			"-Difogsim.max.actors.per.step=$MaxActorsPerStep",
+            "-Difogsim.log.summary=$SummaryValue",
+            "-Difogsim.log.decisions=$DecisionValue",
+            "-Difogsim.log.diagnostics=$DiagnosticValue",
+            "-cp", $Classpath, $MainClass, $Seed
+        )
+        & $Java @JavaArgs
+        if ($LASTEXITCODE -ne 0) { throw "Episode seed $Seed failed with exit code $LASTEXITCODE" }
+    }
+    Write-Host "[train_windows] Complete. Model: $ModelPath" -ForegroundColor Green
 } finally {
-    # ── Cleanup ──
-    if ($serverProcess -and -Not $serverProcess.HasExited) {
-        Write-Host "`nStopping Train Server (PID $($serverProcess.Id))..." -ForegroundColor DarkGray
-        Stop-Process -Id $serverProcess.Id -Force
+    if ($Server -and -not $Server.HasExited) {
+        Stop-Process -Id $Server.Id -Force
     }
-    # Optionally show logs
-    Write-Host "Server stdout (last 5 lines):"
-    Get-Content "$AGENTS_DIR\server_stdout.log" -Tail 5 -ErrorAction SilentlyContinue
-    Write-Host "Server stderr (if any):"
-    Get-Content "$AGENTS_DIR\server_stderr.log" -ErrorAction SilentlyContinue
 }

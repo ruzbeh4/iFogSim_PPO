@@ -25,6 +25,14 @@ public class TimeKeeper {
 	private Map<Integer, Integer> loopIdToCurrentNum;
 
 	private Map<Integer, Integer> loopIdToLatencyQoSSuccessCount = new HashMap<>();
+	// Critical tuples are registered by Sensor when emitted and resolved when
+	// their end-to-end application loop reaches its actuator.
+	private Map<Integer, Double> criticalTupleDeadlines = new HashMap<>();
+	private int criticalTasksEmitted;
+	private int criticalTasksOnTime;
+	private int criticalTasksMissed;
+	private int criticalTasksPending;
+	private double criticalDeadlineTotalMs;
 
 	// loopID -> < Microservice -> < deviceID, <requestCount,totalExecutionTime > >
 	private Map<Integer, Map<String, Map<Integer, Pair<Integer, Double>>>> costCalcData = new HashMap<>();
@@ -159,6 +167,47 @@ public class TimeKeeper {
 
 	public Map<Integer, Integer> getLoopIdToLatencyQoSSuccessCount() {
 		return loopIdToLatencyQoSSuccessCount;
+	}
+
+	public void registerCriticalTask(int actualTupleId, double deadlineMs) {
+		if (actualTupleId < 0) return;
+		criticalTupleDeadlines.put(actualTupleId, deadlineMs);
+		criticalTasksEmitted++;
+		criticalDeadlineTotalMs += deadlineMs;
+	}
+
+	public void recordLoopCompletion(int actualTupleId, int loopId, double delayMs) {
+		Double deadlineMs = criticalTupleDeadlines.remove(actualTupleId);
+		if (deadlineMs == null) return;
+		if (delayMs <= deadlineMs) {
+			criticalTasksOnTime++;
+			loopIdToLatencyQoSSuccessCount.merge(loopId, 1, Integer::sum);
+		}
+		else criticalTasksMissed++;
+	}
+
+	/**
+	 * At a finite simulation horizon, only an unfinished tuple whose own
+	 * deadline has elapsed is a miss. Later-deadline tuples are censored
+	 * observations and must not lower the QoS success rate.
+	 */
+	public void finalizeCriticalTasks() {
+		for (Map.Entry<Integer, Double> entry : criticalTupleDeadlines.entrySet()) {
+			Double emitTime = emitTimes.get(entry.getKey());
+			if (emitTime != null && emitTime + entry.getValue() <= CloudSim.clock())
+				criticalTasksMissed++;
+			else
+				criticalTasksPending++;
+		}
+		criticalTupleDeadlines.clear();
+	}
+
+	public int getCriticalTasksEmitted() { return criticalTasksEmitted; }
+	public int getCriticalTasksOnTime() { return criticalTasksOnTime; }
+	public int getCriticalTasksMissed() { return criticalTasksMissed; }
+	public int getCriticalTasksPending() { return criticalTasksPending; }
+	public double getCriticalDeadlineMeanMs() {
+		return criticalTasksEmitted == 0 ? 0.0 : criticalDeadlineTotalMs / criticalTasksEmitted;
 	}
 
 	public void addCostCalcData(List<Integer> loopIds, String microserviceName, int deviceId, int tupleId) {

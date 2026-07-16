@@ -95,7 +95,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
     private final int    port;
 
     /** Monotonically increasing counter included in each step message. */
-    private int stepCounter = 0;
+    protected int stepCounter = 0;
 
     /** Total energy consumption recorded at the end of the previous step (for reward delta). */
     private static double lastTotalEnergy = 0.0;
@@ -240,7 +240,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
     // Network I/O
     // -------------------------------------------------------------------------
 
-    private String queryPythonAgent(String stateJson) throws IOException {
+    protected String queryPythonAgent(String stateJson) throws IOException {
         try (Socket socket = new Socket(host, port)) {
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             PrintWriter    out = new PrintWriter(
@@ -394,7 +394,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
      * bookkeeping directly (this path does NOT go through generatePlacementMap(), which
      * has no concept of re-placing an already-placed module).
      */
-    private void applyMigration(int prId, String moduleName, int toDeviceId) {
+    protected void applyMigration(int prId, String moduleName, int toDeviceId) {
         PlacementRequest pr = findPrById(prId);
         if (pr == null) {
             System.err.println("[PPOBridge] Unknown requestId " + prId + " in migration.");
@@ -507,7 +507,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
     }
 
     /** Records a brand-new module→device assignment (mirrors PythonBridgePlacementLogic.recordPlacement). */
-    private void recordNewPlacement(int prId, String moduleName, int deviceId, Application app) {
+    protected void recordNewPlacement(int prId, String moduleName, int deviceId, Application app) {
         mappedMicroservices.get(prId).put(moduleName, deviceId);
 
         if (!currentModuleMap.get(deviceId).contains(moduleName))
@@ -564,24 +564,24 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
     // Utility helpers
     // -------------------------------------------------------------------------
 
-    private double getModuleMips(String moduleName, Application app) {
+    protected double getModuleMips(String moduleName, Application app) {
         for (AppModule m : app.getModules()) {
             if (m.getName().equals(moduleName)) return m.getMips();
         }
         return 0.0;
     }
 
-    private FogDevice findDeviceByName(String name) {
+    protected FogDevice findDeviceByName(String name) {
         for (FogDevice d : fogDevices) if (d.getName().equals(name)) return d;
         return null;
     }
 
-    private FogDevice findDeviceById(int id) {
+    protected FogDevice findDeviceById(int id) {
         for (FogDevice d : fogDevices) if (d.getId() == id) return d;
         return null;
     }
 
-    private PlacementRequest findPrById(int prId) {
+    protected PlacementRequest findPrById(int prId) {
         for (PlacementRequest pr : placementRequests) {
             if (pr.getPlacementRequestId() == prId) return pr;
         }

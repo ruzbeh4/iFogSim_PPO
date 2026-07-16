@@ -12,7 +12,8 @@ public class MicroservicePlacementConfig {
     public static String PR_PROCESSING_MODE = PERIODIC;
 
     // For periodic placement
-    public static final double PLACEMENT_INTERVAL = 1;
+    /** Mutable so dedicated experiments can choose a realistic control cadence. */
+    public static double PLACEMENT_INTERVAL = 1;
 
     //Resource info sharing among cluster nodes
     public static Boolean ENABLE_RESOURCE_DATA_SHARING = false;

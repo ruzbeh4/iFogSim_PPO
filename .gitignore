@@ -28,6 +28,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 python_agent/results/
+agents/models/shared_ppo_model.pth
+agents/shared_smoke_*.log
 
 # ── macOS ────────────────────────────────────────────────────────────────────
 .DS_Store
