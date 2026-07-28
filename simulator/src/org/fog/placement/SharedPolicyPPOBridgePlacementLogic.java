@@ -9,6 +9,7 @@ import org.fog.entities.PlacementRequest;
 import org.fog.utils.Config;
 import org.fog.utils.FogEvents;
 import org.fog.utils.MicroservicePlacementConfig;
+import org.fog.utils.TimeKeeper;
 import org.fog.utils.TrainingLog;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
@@ -22,9 +23,10 @@ import java.util.*;
  * Step zero deliberately uses the legacy placement schema so Python can call
  * GeneticAgent unchanged.  Later steps expose a bounded set of independent
  * service actors.  Each actor sees the same fixed feature vocabulary and a
- * variable candidate list with an explicit feasibility flag.  Rewards contain
- * only energy attributed to the actor's current host and the latency of its own
- * request, avoiding the global-state/global-reward credit-assignment problem.
+ * variable candidate list with an explicit feasibility flag.  Rewards are
+ * positive shaped scores of latency, attributed energy, and critical-deadline
+ * headroom for the actor's own request.  Better placement therefore rises from
+ * near zero toward one instead of approaching zero from below.
  */
 public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic {
     private int sharedStep = 0;
@@ -228,16 +230,9 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
                 * actor.module.getMips() / used;
         double energyCost = attributedEnergy /
                 Math.max(200.0 * MicroservicePlacementConfig.PLACEMENT_INTERVAL, 1.0);
-        double delayCost = currentLatency / 500.0;
         String outcome = previousOutcome.remove(actor.id());
-        double actionPenalty = "rejected".equals(outcome) ? 0.5 : ("migrated".equals(outcome) ? 0.02 : 0.0);
-
-        JSONObject reward = new JSONObject();
-        reward.put("total", -(0.5 * energyCost + 0.5 * delayCost + actionPenalty));
-        reward.put("energy", -energyCost);
-        reward.put("delay", -delayCost);
-        reward.put("actionPenalty", -actionPenalty);
-        reward.put("previousAction", outcome == null ? "none" : outcome);
+        JSONObject reward = buildPositiveReward(currentLatency, energyCost, outcome,
+                current, homeGateway);
 
         item.put("actorId", actor.id());
         item.put("requestId", actor.request.getPlacementRequestId());
@@ -286,6 +281,48 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
         }
         item.put("candidates", candidates);
         return item;
+    }
+
+    /**
+     * Rising positive reward with an explicit locality term. Cloud placement
+     * is scored at zero locality so the policy is pushed away from the
+     * occasional cloud-cost spikes. Energy uses a sharper scale than raw
+     * episode totals, because totalEnergy is dominated by device idle power.
+     */
+    @SuppressWarnings("unchecked")
+    private JSONObject buildPositiveReward(double currentLatency, double energyCost, String outcome,
+                                          FogDevice current, int homeGatewayId) {
+        double latencyScore = 1.0 / (1.0 + currentLatency / 500.0);
+        // Sharper than 1/(1+cost): tiny per-step energy deltas otherwise look identical.
+        double energyScore = 1.0 / (1.0 + 4.0 * Math.max(0.0, energyCost));
+        double deadlineBudgetMs = TimeKeeper.getInstance().getCriticalDeadlineMeanMs();
+        if (deadlineBudgetMs <= 0.0) deadlineBudgetMs = 400.0;
+        double deadlineScore = Math.max(0.0, Math.min(1.0, 1.0 - currentLatency / deadlineBudgetMs));
+        double localityScore;
+        if (current.getLevel() == 0) {
+            localityScore = 0.0; // cloud
+        } else if (current.getId() == homeGatewayId || current.getLevel() == 2) {
+            localityScore = 1.0; // home fog / client
+        } else {
+            localityScore = 0.65; // other fog node
+        }
+        double actionPenalty = "rejected".equals(outcome) ? 0.15
+                : ("migrated".equals(outcome) ? 0.02 : 0.0);
+        double total = 0.30 * latencyScore
+                + 0.20 * energyScore
+                + 0.30 * deadlineScore
+                + 0.20 * localityScore
+                - actionPenalty;
+
+        JSONObject reward = new JSONObject();
+        reward.put("total", total);
+        reward.put("latencyScore", latencyScore);
+        reward.put("energyScore", energyScore);
+        reward.put("deadlineScore", deadlineScore);
+        reward.put("localityScore", localityScore);
+        reward.put("actionPenalty", -actionPenalty);
+        reward.put("previousAction", outcome == null ? "none" : outcome);
+        return reward;
     }
 
     private List<FogDevice> candidateDevices() {

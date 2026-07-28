@@ -18,6 +18,7 @@ import org.fog.placement.MicroservicesController;
 import org.fog.placement.PlacementLogicFactory;
 import org.fog.placement.PPOBridgePlacementLogic;
 import org.fog.placement.SharedPolicyPPOBridgePlacementLogic;
+import org.fog.placement.TrainingMobilityController;
 import org.fog.policy.AppModuleAllocationPolicy;
 import org.fog.scheduler.StreamOperatorScheduler;
 import org.fog.utils.FogLinearPowerModel;
@@ -26,6 +27,7 @@ import org.fog.utils.MicroservicePlacementConfig;
 import org.fog.utils.TimeKeeper;
 import org.fog.utils.TrainingLog;
 import org.fog.utils.distribution.SeededExponentialDistribution;
+import org.fog.utils.distribution.SeededIncidentDistribution;
 import org.fog.utils.distribution.SeededUniformDistribution;
 
 import java.util.*;
@@ -52,11 +54,19 @@ public class IndustrialIoTSimulationTrain {
     static int FOG_GW_MIPS = 15_000;
     static final int GW_TO_CLOUD_LATENCY = 100;
     static final int IOT_TO_GW_LATENCY   = 20;
+    static final double GATEWAY_SPACING_M = 80.0;
+    static final double MOBILITY_SAMPLE_S = 15.0;
+    static final double MOBILITY_MIN_SPEED_MPS = 0.8;
+    static final double MOBILITY_MAX_SPEED_MPS = 1.8;
     // At the required 15+ fog / 150+ gadget scale, each fog gateway serves
-    // ten clients. This seeded workload retains a 1:9 critical/normal mix
-    // while keeping the serial service queues below saturation.
+    // ten clients. Normal traffic stays steady while critical alarms follow
+    // a seeded incident timeline: rare background alerts plus short bursts.
     static final double PERIODIC_MEAN_S = 25.0;
-    static final double CRITICAL_MEAN_S = 225.0;
+    static final double CRITICAL_BACKGROUND_MEAN_S = 320.0;
+    static final double CRITICAL_INCIDENT_MEAN_S = 35.0;
+    static final double CRITICAL_INCIDENT_GAP_MEAN_S = 900.0;
+    static final double CRITICAL_INCIDENT_DURATION_MIN_S = 45.0;
+    static final double CRITICAL_INCIDENT_DURATION_MAX_S = 120.0;
 	// Industrial-control latency budget: seeded per critical event, not a
 	// launcher setting. This creates mixed tight/relaxed critical workloads.
 	static final double CRITICAL_DEADLINE_MIN_MS = 300.0;
@@ -70,8 +80,18 @@ public class IndustrialIoTSimulationTrain {
     static double MOBILE_SHARE = 0.66;
     static boolean SHARED_POLICY = false;
     static long EPISODE_SEED = 1L;
+    static final Map<String, List<double[]>> mobilityTraces = new LinkedHashMap<>();
+    static final Map<Integer, NavigableMap<Double, Integer>> mobilityParentSchedule = new HashMap<>();
+    static final Map<Integer, double[]> gatewayPositions = new HashMap<>();
 
     public static void main(String[] args) {
+        fogDevices.clear();
+        sensors.clear();
+        actuators.clear();
+        mobilityTraces.clear();
+        mobilityParentSchedule.clear();
+        gatewayPositions.clear();
+
         long episodeSeed = 1L;
         if (args.length > 0) {
             try { episodeSeed = Long.parseLong(args[0]); } catch (Exception e) {}
@@ -147,12 +167,12 @@ public class IndustrialIoTSimulationTrain {
             MicroservicePlacementConfig.PR_PROCESSING_MODE = MicroservicePlacementConfig.PERIODIC;
             MicroservicePlacementConfig.ENABLE_RESOURCE_DATA_SHARING = false;
 
-            MicroservicesController controller = new MicroservicesController(
+            MicroservicesController controller = new TrainingMobilityController(
                     "industrial-controller", fogDevices, sensors, Arrays.asList(app),
                     new ArrayList<>(), 2.0,
                     SHARED_POLICY ? PlacementLogicFactory.SHARED_PPO_BRIDGE_PLACEMENT
                             : PlacementLogicFactory.PPO_BRIDGE_PLACEMENT,
-                    monitored);
+                    monitored, mobilityParentSchedule);
 
             List<PlacementRequest> placementRequests = new ArrayList<>();
             for (FogDevice dev : fogDevices) {
@@ -190,26 +210,36 @@ public class IndustrialIoTSimulationTrain {
         cloud.setParentId(-1);
         fogDevices.add(cloud);
 
+        List<MicroserviceFogDevice> gateways = new ArrayList<>();
         Random typeRandom = new Random(SEED_DEVICE_TYPE);
         for (int i = 0; i < NUM_FOG_GATEWAYS; i++) {
             MicroserviceFogDevice gw = createFogDevice("FogGW-" + i, FOG_GW_MIPS, 16384, 10000, 10000, 1, 0.0, 107.339, 83.4333, MicroserviceFogDevice.FCN);
             gw.setParentId(cloud.getId());
             gw.setUplinkLatency(GW_TO_CLOUD_LATENCY);
             fogDevices.add(gw);
+            gateways.add(gw);
+            gatewayPositions.put(gw.getId(), gatewayPositionForIndex(i));
+        }
 
+        for (int i = 0; i < gateways.size(); i++) {
+            MicroserviceFogDevice gw = gateways.get(i);
             for (int j = 0; j < CLIENTS_PER_GATEWAY; j++) {
                 boolean isMobile = typeRandom.nextDouble() < MOBILE_SHARE;
                 String deviceName = (isMobile ? "MobileRobot-" : "FixedSensor-") + i + "-" + j;
-                addIoTClient(userId, deviceName, gw.getId());
+                addIoTClient(userId, deviceName, gw.getId(), isMobile);
             }
         }
     }
 
-    private static void addIoTClient(int userId, String deviceName, int parentId) {
+    private static void addIoTClient(int userId, String deviceName, int parentId, boolean isMobile) {
         MicroserviceFogDevice iotDevice = createFogDevice(deviceName, 1000, 2048, 18750, 250, 2, 0.0, 87.53, 82.44, MicroserviceFogDevice.CLIENT);
         iotDevice.setParentId(parentId);
         iotDevice.setUplinkLatency(IOT_TO_GW_LATENCY);
         fogDevices.add(iotDevice);
+
+        if (isMobile) {
+            registerMobileTrace(iotDevice.getId(), deviceName, parentId);
+        }
 
         long deviceTrafficSeed = SEED_TRAFFIC + iotDevice.getId();
 
@@ -221,7 +251,13 @@ public class IndustrialIoTSimulationTrain {
         sensors.add(periodicSensor);
 
         Sensor criticalSensor = new Sensor("sensor-critical-" + deviceName, "CRITICAL_IOT_SENSOR", userId, APP_ID,
-                new SeededExponentialDistribution(CRITICAL_MEAN_S, deviceTrafficSeed + 1000));
+                new SeededIncidentDistribution(
+                        CRITICAL_BACKGROUND_MEAN_S,
+                        CRITICAL_INCIDENT_MEAN_S,
+                        CRITICAL_INCIDENT_GAP_MEAN_S,
+                        CRITICAL_INCIDENT_DURATION_MIN_S,
+                        CRITICAL_INCIDENT_DURATION_MAX_S,
+                        deviceTrafficSeed + 1000));
         criticalSensor.setGatewayDeviceId(iotDevice.getId());
         criticalSensor.setLatency(1.0);
         criticalSensor.setApp(application);
@@ -378,8 +414,24 @@ public class IndustrialIoTSimulationTrain {
             }
             sb.append("},");
 
-            // Mobility traces (optional, but keep structure)
-            sb.append("\"mobility\":{},");
+            sb.append("\"mobility\":{");
+            boolean firstTrace = true;
+            for (Map.Entry<String, List<double[]>> entry : mobilityTraces.entrySet()) {
+                if (!firstTrace) sb.append(",");
+                firstTrace = false;
+                sb.append("\"").append(entry.getKey()).append("\":[");
+                boolean firstPoint = true;
+                for (double[] point : entry.getValue()) {
+                    if (!firstPoint) sb.append(",");
+                    firstPoint = false;
+                    sb.append("[")
+                            .append(point[0]).append(",")
+                            .append(point[1]).append(",")
+                            .append(point[2]).append("]");
+                }
+                sb.append("]");
+            }
+            sb.append("},");
 
             sb.append("\"numRequests\":").append(placementLog.stream()
                     .map(e -> e.get("requestId")).distinct().count()).append(",");
@@ -455,5 +507,92 @@ public class IndustrialIoTSimulationTrain {
         } catch (Exception e) {
             System.err.println("[Bridge] Could not send results to Python: " + e.getMessage());
         }
+    }
+
+    private static double[] gatewayPositionForIndex(int index) {
+        int columns = Math.max(1, (int) Math.ceil(Math.sqrt(NUM_FOG_GATEWAYS)));
+        int row = index / columns;
+        int col = index % columns;
+        return new double[]{col * GATEWAY_SPACING_M, row * GATEWAY_SPACING_M};
+    }
+
+    private static void registerMobileTrace(int deviceId, String deviceName, int initialParentId) {
+        Random rnd = new Random(SEED_MOBILITY + deviceId);
+        double[] initialGateway = gatewayPositions.get(initialParentId);
+        if (initialGateway == null) return;
+
+        int horizon = org.fog.utils.Config.MAX_SIMULATION_TIME;
+        double[] position = new double[]{
+                initialGateway[0] + (rnd.nextDouble() - 0.5) * GATEWAY_SPACING_M * 0.35,
+                initialGateway[1] + (rnd.nextDouble() - 0.5) * GATEWAY_SPACING_M * 0.35
+        };
+        double[] target = randomWaypoint(rnd);
+        int currentParent = initialParentId;
+
+        List<double[]> trace = new ArrayList<>();
+        NavigableMap<Double, Integer> parentSchedule = new TreeMap<>();
+        parentSchedule.put(0.0, initialParentId);
+        trace.add(new double[]{0.0, position[0], position[1]});
+
+        for (double time = MOBILITY_SAMPLE_S; time <= horizon; time += MOBILITY_SAMPLE_S) {
+            double stepDistance = (MOBILITY_MIN_SPEED_MPS
+                    + rnd.nextDouble() * (MOBILITY_MAX_SPEED_MPS - MOBILITY_MIN_SPEED_MPS)) * MOBILITY_SAMPLE_S;
+            position = moveTowards(position, target, stepDistance);
+            if (distance(position, target) < GATEWAY_SPACING_M * 0.20) {
+                target = randomWaypoint(rnd);
+            }
+
+            int nearestParent = findNearestGateway(position);
+            if (nearestParent != currentParent) {
+                currentParent = nearestParent;
+                parentSchedule.put(time, currentParent);
+            }
+            trace.add(new double[]{time, position[0], position[1]});
+        }
+
+        mobilityTraces.put(deviceName, trace);
+        mobilityParentSchedule.put(deviceId, parentSchedule);
+    }
+
+    private static double[] randomWaypoint(Random rnd) {
+        int columns = Math.max(1, (int) Math.ceil(Math.sqrt(NUM_FOG_GATEWAYS)));
+        int rows = Math.max(1, (int) Math.ceil((double) NUM_FOG_GATEWAYS / columns));
+        double maxX = Math.max(0.0, (columns - 1) * GATEWAY_SPACING_M);
+        double maxY = Math.max(0.0, (rows - 1) * GATEWAY_SPACING_M);
+        double padding = GATEWAY_SPACING_M * 0.35;
+        return new double[]{
+                rnd.nextDouble() * (maxX + padding),
+                rnd.nextDouble() * (maxY + padding)
+        };
+    }
+
+    private static double[] moveTowards(double[] from, double[] to, double stepDistance) {
+        double dx = to[0] - from[0];
+        double dy = to[1] - from[1];
+        double distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance == 0.0 || distance <= stepDistance) {
+            return new double[]{to[0], to[1]};
+        }
+        double scale = stepDistance / distance;
+        return new double[]{from[0] + dx * scale, from[1] + dy * scale};
+    }
+
+    private static int findNearestGateway(double[] position) {
+        int nearestGateway = -1;
+        double bestDistance = Double.MAX_VALUE;
+        for (Map.Entry<Integer, double[]> entry : gatewayPositions.entrySet()) {
+            double candidateDistance = distance(position, entry.getValue());
+            if (candidateDistance < bestDistance) {
+                bestDistance = candidateDistance;
+                nearestGateway = entry.getKey();
+            }
+        }
+        return nearestGateway;
+    }
+
+    private static double distance(double[] a, double[] b) {
+        double dx = a[0] - b[0];
+        double dy = a[1] - b[1];
+        return Math.sqrt(dx * dx + dy * dy);
     }
 }

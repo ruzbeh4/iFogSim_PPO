@@ -62,8 +62,11 @@ command -v javac >/dev/null 2>&1 || { echo "[train.sh] javac was not found." >&2
 if [[ "$SKIP_COMPILE" -eq 0 ]]; then
   echo "[train.sh] Compiling simulator..."
   mkdir -p "$BUILD_DIR"
-  find "$SIM_DIR/src" -name '*.java' -print > "$SOURCE_LIST"
-  javac -encoding UTF-8 -cp "$JARS_DIR/*" -d "$BUILD_DIR" "@$SOURCE_LIST"
+  (
+    cd "$SIM_DIR"
+    find src -name '*.java' -print > "$SOURCE_LIST"
+    javac -encoding UTF-8 -cp "$JARS_DIR/*" -d "$BUILD_DIR" @"$SOURCE_LIST"
+  )
 fi
 
 if [[ "$RESET_TRAINING" -eq 1 ]]; then
