@@ -1,4 +1,4 @@
-"""Persistent bridge server for shared-service PPO training."""
+"""Shared-policy PPO training bridge server."""
 
 import argparse
 import contextlib
@@ -10,6 +10,7 @@ import threading
 import time
 
 from agents.shared_ppo import SharedPPOAgent
+from utils.results_paths import make_run_dir, model_path_for
 
 
 class SharedTrainingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -39,15 +40,16 @@ class SharedTrainingHandler(socketserver.StreamRequestHandler):
         message_type = payload.get("type")
         if message_type == "shared_initial":
             if self.server.progress:
-                print(f"[SharedServer] episodeSeed={payload.get('episodeSeed')} genetic initial placement")
+                print(f"[train] episodeSeed={payload.get('episodeSeed')} initial placement")
                 return self.server.agent.decide_initial(payload)
-            # GeneticAgent intentionally remains unchanged; hide its one-line
-            # fitness print during normal compact training output.
             with contextlib.redirect_stdout(io.StringIO()):
                 return self.server.agent.decide_initial(payload)
         if message_type == "shared_step":
             if self.server.progress and (payload.get("done") or int(payload.get("step", 0)) % 20 == 0):
-                print(f"[SharedServer] step={payload.get('step')} actors={len(payload.get('actors', []))} done={payload.get('done')}")
+                print(
+                    f"[train] step={payload.get('step')} "
+                    f"actors={len(payload.get('actors', []))} done={payload.get('done')}"
+                )
             return self.server.agent.decide_step(payload)
         if message_type == "results":
             self.server.agent.on_episode_end(payload)
@@ -55,13 +57,11 @@ class SharedTrainingHandler(socketserver.StreamRequestHandler):
             return {"status": "saved", "episode": self.server.agent.episode}
         raise ValueError(f"Unsupported message type: {message_type!r}")
 
-    @staticmethod
-    def _save_episode(payload):
-        results_dir = os.path.join(os.path.dirname(__file__), "results", "shared_ppo")
-        os.makedirs(results_dir, exist_ok=True)
+    def _save_episode(self, payload):
+        os.makedirs(self.server.results_dir, exist_ok=True)
         seed = payload.get("episodeSeed", "unknown")
         filename = f"episode_{seed}_{time.strftime('%Y%m%d_%H%M%S')}.json"
-        with open(os.path.join(results_dir, filename), "w", encoding="utf-8") as handle:
+        with open(os.path.join(self.server.results_dir, filename), "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
 
@@ -70,35 +70,43 @@ def main():
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--model", default=None)
-    parser.add_argument("--convergence", default=None,
-                        help="Path for this experiment's convergence history JSON")
+    parser.add_argument("--convergence", default=None)
+    parser.add_argument("--results-dir", default=None)
+    parser.add_argument("--run-name", default="shared_ppo")
     parser.add_argument("--max-migrations", type=int, default=2)
     parser.add_argument("--inference", action="store_true")
-    parser.add_argument("--progress", action="store_true",
-                        help="Print bridge/PPO progress in addition to trajectory summaries")
+    parser.add_argument("--progress", action="store_true")
+    parser.add_argument(
+        "--placement-init",
+        choices=("genetic", "heuristic", "bad_heuristic"),
+        default="genetic",
+    )
     args = parser.parse_args()
 
+    results_dir = args.results_dir or str(make_run_dir("single", args.run_name))
+    model_path = args.model or str(model_path_for(results_dir))
+    convergence = args.convergence or os.path.join(results_dir, "convergence.json")
+
     agent = SharedPPOAgent(
-        model_path=args.model,
-        convergence_path=args.convergence,
+        model_path=model_path,
+        convergence_path=convergence,
         training=not args.inference,
         max_migrations_per_step=args.max_migrations,
         verbose=args.progress,
+        placement_init=args.placement_init,
     )
     with SharedTrainingServer((args.host, args.port), SharedTrainingHandler) as server:
         server.agent = agent
         server.agent_lock = threading.Lock()
         server.progress = args.progress
+        server.results_dir = results_dir
         if args.progress:
-            print(f"[SharedServer] listening on {args.host}:{args.port}; device={DEVICE_NAME(agent)}")
+            device = next(agent.policy.parameters()).device
+            print(f"[train] listening on {args.host}:{args.port}; device={device}; results={results_dir}")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            print("\n[SharedServer] stopping")
-
-
-def DEVICE_NAME(agent):
-    return str(next(agent.policy.parameters()).device)
+            print("\n[train] stopping")
 
 
 if __name__ == "__main__":

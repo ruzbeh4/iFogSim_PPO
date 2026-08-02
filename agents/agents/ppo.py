@@ -1,8 +1,4 @@
-"""
-ppo.py – Trained Inference Agent.
-Step 0: least‑loaded heuristic (same as ppo_old).
-Step > 0: trained PPO model for migrations.
-"""
+"""Trained PPO inference agent (heuristic at step 0, model for migrations)."""
 
 import torch
 import torch.nn as nn
@@ -12,8 +8,12 @@ import os
 from .base_agent import BasePlacementAgent
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "ppo_model.pth")
+
+
+def _resolve_model_path() -> str | None:
+    from utils.results_paths import latest_model_path
+    path = latest_model_path("scenario_ppo")
+    return str(path) if path is not None else None
 
 
 class ActorCritic(nn.Module):
@@ -39,21 +39,18 @@ class PPOAgent(BasePlacementAgent):
         self.state_dim = (self.max_candidates * 2) + (self.max_modules * 2)
 
         self.policy = ActorCritic(self.state_dim, self.max_modules, self.max_candidates).to(DEVICE)
-        if os.path.exists(MODEL_PATH):
-            self.policy.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
+        model_path = _resolve_model_path()
+        if model_path and os.path.exists(model_path):
+            self.policy.load_state_dict(torch.load(model_path, map_location=DEVICE, weights_only=True))
             self.policy.eval()
-            print(f"[PPO Inference] Loaded model from {MODEL_PATH}")
+            print(f"[PPO Inference] Loaded model from {model_path}")
         else:
-            print(f"[WARNING] No model at {MODEL_PATH}. Random actions will be used.")
-
-    # ----- Entry points -----
+            print("[WARNING] No scenario_ppo model.pth found under results/. Random actions will be used.")
 
     def decide(self, state: dict) -> dict:
-        """Static‑bridge fallback (not used in training/inference step loop)."""
         return self._heuristic_placement(state)
 
     def decide_step(self, state: dict) -> dict:
-        """Step‑protocol entry point."""
         step = state.get("step", 0)
         done = state.get("done", False)
 
@@ -64,7 +61,6 @@ class PPOAgent(BasePlacementAgent):
         if done:
             return {"placements": [], "migrations": []}
 
-        # ----- Step > 0 : PPO migration decision -----
         devices = state.get("devices", [])
         candidates = sorted([d for d in devices if d["level"] < 2], key=lambda x: x["id"])
 
@@ -104,11 +100,8 @@ class PPOAgent(BasePlacementAgent):
 
         return {"placements": [], "migrations": migrations}
 
-    # ----- Heuristic helpers (exactly as in ppo_old) -----
-
     @staticmethod
     def _heuristic_placement(state: dict) -> dict:
-        """Static placement (used only for fallback)."""
         candidates = BasePlacementAgent.candidate_devices(state)
         placement_map = {}
         for request in state.get("requests", []):
@@ -122,7 +115,6 @@ class PPOAgent(BasePlacementAgent):
 
     @staticmethod
     def _heuristic_placement_step(state: dict) -> dict:
-        """Step‑protocol initial placement: place all pending modules."""
         devices = state.get("devices", [])
         committed_mips = {d["id"]: 0.0 for d in devices}
         placements = []

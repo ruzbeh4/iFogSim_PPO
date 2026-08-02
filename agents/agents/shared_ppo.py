@@ -1,10 +1,4 @@
-"""Shared service-level PPO used by the revised iFogSim training bridge.
-
-Initial placement is delegated to the existing GeneticAgent without changing
-its state schema or implementation.  During migration, every service is an
-actor evaluated by the same candidate-scoring network.  Consequently the
-network dimensions do not depend on the number of fog nodes or services.
-"""
+"""Shared service-level PPO agent for the revised iFogSim training bridge."""
 
 from __future__ import annotations
 
@@ -20,6 +14,7 @@ from torch import nn
 from torch.distributions import Categorical
 
 from .genetic import GeneticAgent
+from .heuristic import HeuristicAgent
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,10 +26,10 @@ VALUE_COEF = 0.5
 LEARNING_RATE = 3.0e-4
 PPO_EPOCHS = 6
 MINIBATCH_SIZE = 256
+PLACEMENT_INIT_CHOICES = ("genetic", "heuristic", "bad_heuristic")
 
 
 class SharedActorCritic(nn.Module):
-    """Scores a variable-length candidate list with shared parameters."""
 
     def __init__(self, feature_dim: int = FEATURE_DIM):
         super().__init__()
@@ -51,7 +46,6 @@ class SharedActorCritic(nn.Module):
         encoded = self.encoder(features)
         logits = self.actor(encoded).squeeze(-1).masked_fill(~mask, -1.0e9)
         distribution = Categorical(logits=logits)
-        # Mean pooling makes the value estimate invariant to candidate order/count.
         value = self.critic(encoded.mean(dim=0)).squeeze(-1)
         return distribution, value
 
@@ -74,12 +68,10 @@ class Transition:
     old_logprob: float
     target: float
     advantage: float
-    # Immediate simulator reward for an interpretable training diagnostic.
     reward: float
 
 
 class SharedPPOAgent:
-    """One PPO policy shared by all movable microservice instances."""
 
     def __init__(
         self,
@@ -88,17 +80,25 @@ class SharedPPOAgent:
         training: bool = True,
         max_migrations_per_step: int = 2,
         verbose: bool = False,
+        placement_init: str = "genetic",
     ):
         base_dir = os.path.dirname(os.path.dirname(__file__))
-        self.model_path = model_path or os.path.join(base_dir, "models", "shared_ppo_model.pth")
+        self.model_path = model_path or os.path.join(base_dir, "results", "model.pth")
         self.convergence_path = convergence_path or os.path.join(
-            base_dir, "results", "shared_ppo_convergence.json")
+            os.path.dirname(self.model_path), "convergence.json")
         self.training = training
         self.max_migrations_per_step = max(0, max_migrations_per_step)
         self.verbose = verbose
+        if placement_init not in PLACEMENT_INIT_CHOICES:
+            raise ValueError(
+                f"placement_init must be one of {PLACEMENT_INIT_CHOICES}, got {placement_init!r}"
+            )
+        self.placement_init = placement_init
         self.policy = SharedActorCritic().to(DEVICE)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
         self.genetic = GeneticAgent()
+        self.heuristic = HeuristicAgent(bad_placement=False)
+        self.bad_heuristic = HeuristicAgent(bad_placement=True)
         self.pending: dict[str, PendingDecision] = {}
         self.transitions: list[Transition] = []
         self.episode = 0
@@ -121,13 +121,17 @@ class SharedPPOAgent:
             print(f"[SharedPPO] Loaded checkpoint: {self.model_path}")
 
     def decide_initial(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Run the existing GA on its original placement schema."""
         seed = int(state.get("episodeSeed", 1))
         random.seed(seed)
         np.random.seed(seed & 0xFFFFFFFF)
         torch.manual_seed(seed)
         ga_state = {key: state[key] for key in ("step", "devices", "requests", "allModules")}
-        decision = self.genetic.decide(ga_state)
+        if self.placement_init == "bad_heuristic":
+            decision = self.bad_heuristic.decide(ga_state)
+        elif self.placement_init == "heuristic":
+            decision = self.heuristic.decide(ga_state)
+        else:
+            decision = self.genetic.decide(ga_state)
         placements = []
         for request_id, modules in decision.get("placement", {}).items():
             for module, device_id in modules.items():
@@ -298,7 +302,12 @@ class SharedPPOAgent:
             **update_stats,
         }
         self.convergence.append(summary)
-        self._save()
+        if self.training:
+            self._save()
+        else:
+            os.makedirs(os.path.dirname(self.convergence_path) or ".", exist_ok=True)
+            with open(self.convergence_path, "w", encoding="utf-8") as handle:
+                json.dump(self.convergence, handle, indent=2)
         self.transitions.clear()
         self.pending.clear()
         if self.verbose:

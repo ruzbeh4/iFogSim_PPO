@@ -17,17 +17,7 @@ import org.json.simple.parser.JSONParser;
 
 import java.util.*;
 
-/**
- * Revised bridge for a service-level shared PPO policy.
- *
- * Step zero deliberately uses the legacy placement schema so Python can call
- * GeneticAgent unchanged.  Later steps expose a bounded set of independent
- * service actors.  Each actor sees the same fixed feature vocabulary and a
- * variable candidate list with an explicit feasibility flag.  Rewards are
- * positive shaped scores of latency, attributed energy, and critical-deadline
- * headroom for the actor's own request.  Better placement therefore rises from
- * near zero toward one instead of approaching zero from below.
- */
+/** Shared service-level PPO bridge: GA/heuristic init at step 0, then per-service migrations. */
 public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic {
     private int sharedStep = 0;
     private final long episodeSeed = Long.getLong("ifogsim.episode.seed", 1L);
@@ -85,8 +75,6 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
         snapshotEnergy();
         sharedStep++;
         if (!done) {
-            // The periodic fog-device loop clears its request queue on every tick.
-            // Reinsert the same requests just before the next processing event.
             for (PlacementRequest request : placementRequests) {
                 CloudSim.send(fonID, fonID, MicroservicePlacementConfig.PLACEMENT_INTERVAL,
                         FogEvents.RECEIVE_PR, request);
@@ -182,8 +170,6 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
         }
         all.sort(Comparator.comparing(ServiceActor::id));
         if (all.isEmpty()) return all;
-        // Keep each bridge exchange bounded even when each client hosts a
-        // preprocessor. Round-robin selection gives every service equal turns.
         int maxActors = Math.max(1, Integer.getInteger("ifogsim.max.actors.per.step", 32));
         List<ServiceActor> selected = new ArrayList<>();
         int count = Math.min(maxActors, all.size());
@@ -283,28 +269,22 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
         return item;
     }
 
-    /**
-     * Rising positive reward with an explicit locality term. Cloud placement
-     * is scored at zero locality so the policy is pushed away from the
-     * occasional cloud-cost spikes. Energy uses a sharper scale than raw
-     * episode totals, because totalEnergy is dominated by device idle power.
-     */
+    /** Positive shaped reward: latency, energy, deadline headroom, locality; small migrate/reject penalty. */
     @SuppressWarnings("unchecked")
     private JSONObject buildPositiveReward(double currentLatency, double energyCost, String outcome,
                                           FogDevice current, int homeGatewayId) {
         double latencyScore = 1.0 / (1.0 + currentLatency / 500.0);
-        // Sharper than 1/(1+cost): tiny per-step energy deltas otherwise look identical.
         double energyScore = 1.0 / (1.0 + 4.0 * Math.max(0.0, energyCost));
         double deadlineBudgetMs = TimeKeeper.getInstance().getCriticalDeadlineMeanMs();
         if (deadlineBudgetMs <= 0.0) deadlineBudgetMs = 400.0;
         double deadlineScore = Math.max(0.0, Math.min(1.0, 1.0 - currentLatency / deadlineBudgetMs));
         double localityScore;
         if (current.getLevel() == 0) {
-            localityScore = 0.0; // cloud
+            localityScore = 0.0;
         } else if (current.getId() == homeGatewayId || current.getLevel() == 2) {
-            localityScore = 1.0; // home fog / client
+            localityScore = 1.0;
         } else {
-            localityScore = 0.65; // other fog node
+            localityScore = 0.65;
         }
         double actionPenalty = "rejected".equals(outcome) ? 0.15
                 : ("migrated".equals(outcome) ? 0.02 : 0.0);
@@ -461,8 +441,6 @@ public class SharedPolicyPPOBridgePlacementLogic extends PPOBridgePlacementLogic
         Application app = applicationInfo.get(request.getApplicationId());
         AppModule module = app.getModuleByName(moduleName);
         if (module == null) return;
-        // Match PythonBridgePlacementLogic exactly for the GA phase: the GA owns
-        // feasibility and Java records its chromosome without a second policy.
         recordNewPlacement(requestId, moduleName, deviceId, app);
         TrainingLog.decision("GA placed request=" + requestId + " " + moduleName
                 + " -> " + device.getName());

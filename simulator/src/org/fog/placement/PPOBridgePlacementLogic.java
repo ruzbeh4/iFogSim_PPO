@@ -19,70 +19,9 @@ import java.io.*;
 import java.net.Socket;
 import java.util.*;
 
-/**
- * Placement logic that runs a Gym-style step loop against an external Python
- * DRL/PPO agent: state → action → reward → repeat, for the entire simulation
- * (not just once at time 0).
- *
- * Difference from {@link PythonBridgePlacementLogic}
- * ────────────────────────────────────────────────────────────────────────────
- * PythonBridgePlacementLogic is called once per PlacementRequest under
- * STATIC + SEQUENTIAL mode — every decision happens at simulation time 0.
- *
- * PPOBridgePlacementLogic is called repeatedly under PERIODIC mode, once
- * every {@link MicroservicePlacementConfig#PLACEMENT_INTERVAL} simulated
- * time units, for the entire run. After the very first call places every
- * module, every subsequent call gives the Python agent a chance to MIGRATE
- * already-placed modules in response to changing traffic load / device
- * movement — directly modelling the PDF requirement that "microservices can
- * migrate between nodes" and tasks can be re-offloaded over time.
- *
- * Step protocol (one exchange per tick, fresh TCP connection per call)
- * ────────────────────────────────────────────────────────────────────────────
- * Java → Python:
- * {
- *   "type": "step",
- *   "step": <int>,
- *   "simTime": <float>,
- *   "done": <bool>,              // true on the last tick before STOP_SIMULATION
- *   "reward": <float>,           // reward for the PREVIOUS action (0 on step 0)
- *   "devices": [
- *     { "id":<int>, "name":<str>, "level":<int>, "parentId":<int>,
- *       "availableMips":<float>, "availableRam":<float>, "currentLoad":<float> }, ...
- *   ],
- *   "modules": [
- *     { "requestId":<int>, "name":<str>, "status":"placed"|"pending",
- *       "deviceId":<int|null>, "requiredMips":<float>, "requiredRam":<float> }, ...
- *   ]
- * }
- *
- * Python → Java:
- * {
- *   "placements": [ { "requestId":<int>, "module":<str>, "deviceId":<int> }, ... ],
- *   "migrations":  [ { "requestId":<int>, "module":<str>, "toDeviceId":<int> }, ... ]
- * }
- *
- * "placements" assigns modules that aren't deployed anywhere yet (same
- * semantics as PythonBridgePlacementLogic). "migrations" moves an
- * already-deployed module to a different device: the old instance is
- * released (FogEvents.RELEASE_MODULE via MODULE_SEND) and a new one is
- * launched on the target device (MODULE_RECEIVE), service-discovery routes
- * are updated for affected client/service modules, and the move is recorded
- * in {@link #MIGRATION_LOG} for the "Service Migration Count" metric.
- *
- * Reward
- * ────────────────────────────────────────────────────────────────────────────
- * reward = -(W_ENERGY * energyDeltaSinceLastStep + W_LATENCY * currentLoopDelayMs)
- * i.e. the agent is penalised for both energy growth and end-to-end latency,
- * matching the PDF's dual objective. Tune W_ENERGY / W_LATENCY as needed.
- *
- * @author M-H-Boroumandnia
- */
+/** Periodic Gym-style placement/migration bridge to an external Python PPO agent. */
 public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic {
 
-    // -------------------------------------------------------------------------
-    // Configuration
-    // -------------------------------------------------------------------------
     public static final String DEFAULT_HOST = "localhost";
     public static final int    DEFAULT_PORT = 5555;
     private static final int   SOCKET_TIMEOUT_MS = 10_000;
@@ -100,24 +39,13 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
     /** Total energy consumption recorded at the end of the previous step (for reward delta). */
     private static double lastTotalEnergy = 0.0;
 
-    /**
-     * Full history of every step's reward, kept for an eventual convergence-curve plot.
-     * Each entry: step | simTime | reward | done
-     */
+    /** Per-step reward log: step, simTime, reward, done. */
     public static final List<Map<String, Object>> STEP_LOG = new ArrayList<>();
 
-    /**
-     * Every migration applied during the run, for the "Service Migration Count" metric.
-     * Each entry: step | requestId | module | fromDevice | toDevice
-     */
+    /** Applied migrations: step, requestId, module, fromDevice, toDevice. */
     public static final List<Map<String, Object>> MIGRATION_LOG = new ArrayList<>();
 
-    /**
-     * Every brand-new (first-time) module placement, mirroring
-     * PythonBridgePlacementLogic.PLACEMENT_LOG so the final results export
-     * can show where everything ended up.
-     * Each entry: step | requestId | module | device | deviceId
-     */
+    /** First-time placements: step, requestId, module, device, deviceId. */
     public static final List<Map<String, Object>> PLACEMENT_LOG = new ArrayList<>();
 
     /** Clears all static logs between simulation runs (call before startSimulation()). */
@@ -127,10 +55,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         PLACEMENT_LOG.clear();
         lastTotalEnergy = 0.0;
     }
-
-    // -------------------------------------------------------------------------
-    // Constructors
-    // -------------------------------------------------------------------------
 
     public PPOBridgePlacementLogic(int fonId) {
         this(fonId, DEFAULT_HOST, DEFAULT_PORT);
@@ -142,13 +66,8 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         this.port = port;
     }
 
-    // -------------------------------------------------------------------------
-    // Core override — runs one Gym-style step every time the controller calls us
-    // -------------------------------------------------------------------------
-
     @Override
     public void mapModules() {
-        // ── 1. Force-place "special" (cloud-pinned) modules, same as the static bridge ──
         for (PlacementRequest pr : placementRequests) {
             mappedMicroservices.put(pr.getPlacementRequestId(),
                     new HashMap<>(pr.getPlacedMicroservices()));
@@ -173,7 +92,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             }
         }
 
-        // ── 2. Compute reward for the PREVIOUS step, then run this step's exchange ──
         double totalEnergy = sumEnergyConsumption();
         double energyDelta = (stepCounter == 0) ? 0.0 : Math.max(0.0, totalEnergy - lastTotalEnergy);
         Double loopDelay = readCurrentLoopDelayMs();
@@ -205,7 +123,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
 
         stepCounter++;
 
-        // ── 3. Self-rearm: re-submit the same requests so the FON ticks us again ──
         if (!done) {
             for (PlacementRequest pr : placementRequests) {
                 CloudSim.send(fonID, fonID, MicroservicePlacementConfig.PLACEMENT_INTERVAL,
@@ -213,10 +130,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             }
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Reward inputs
-    // -------------------------------------------------------------------------
 
     private double sumEnergyConsumption() {
         double total = 0.0;
@@ -236,10 +149,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         return null;
     }
 
-    // -------------------------------------------------------------------------
-    // Network I/O
-    // -------------------------------------------------------------------------
-
     protected String queryPythonAgent(String stateJson) throws IOException {
         try (Socket socket = new Socket(host, port)) {
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
@@ -251,10 +160,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             return in.readLine();
         }
     }
-
-    // -------------------------------------------------------------------------
-    // State JSON
-    // -------------------------------------------------------------------------
 
     private String buildStepStateJson(double reward, boolean done) {
         StringBuilder sb = new StringBuilder();
@@ -309,10 +214,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         return sb.toString();
     }
 
-    // -------------------------------------------------------------------------
-    // Action application
-    // -------------------------------------------------------------------------
-
     private void applyAction(String actionJson) {
         Map<String, String> top = parseFlatOrArraySections(actionJson);
 
@@ -347,14 +248,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         }
     }
 
-    /**
-     * Places a module that has no device yet (mirrors PythonBridgePlacementLogic).
-     * Rejects (logs + skips) placements that would exceed the target device's
-     * remaining capacity — the same feasibility guard applyMigration() uses.
-     * Tracks committed load locally per step via getCurrentCpuLoad()/load maps
-     * so multiple modules placed in the SAME batch don't all pile onto whichever
-     * device looked emptiest in the state snapshot sent at the start of the step.
-     */
+    /** Place a not-yet-deployed module if the target has capacity. */
     private void applyPlacement(int prId, String moduleName, int deviceId) {
         PlacementRequest pr = findPrById(prId);
         if (pr == null) {
@@ -387,13 +281,7 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         recordNewPlacement(prId, moduleName, deviceId, app);
     }
 
-    /**
-     * Migrates an already-placed module to a new device: releases the instance on the
-     * old device, launches a fresh instance on the new device, updates service-discovery
-     * routes for affected modules, and patches resourceAvailability / PlacementRequest
-     * bookkeeping directly (this path does NOT go through generatePlacementMap(), which
-     * has no concept of re-placing an already-placed module).
-     */
+    /** Move an already-placed module: release old instance, start new, update discovery. */
     protected void applyMigration(int prId, String moduleName, int toDeviceId) {
         PlacementRequest pr = findPrById(prId);
         if (pr == null) {
@@ -422,7 +310,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         double mips = moduleSpec.getMips();
         double ram  = moduleSpec.getRam();
 
-        // Feasibility check on the target device before moving anything
         double targetAvailMips = resourceAvailability.getOrDefault(toDeviceId, Collections.emptyMap())
                 .getOrDefault(ControllerComponent.CPU, 0.0);
         double targetAvailRam  = resourceAvailability.getOrDefault(toDeviceId, Collections.emptyMap())
@@ -433,17 +320,14 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             return;
         }
 
-        // ── Free capacity on the old device, consume it on the new device ──
         creditResource(fromDeviceId, ControllerComponent.CPU, mips);
         creditResource(fromDeviceId, ControllerComponent.RAM, ram);
         debitResource(toDeviceId, ControllerComponent.CPU, mips);
         debitResource(toDeviceId, ControllerComponent.RAM, ram);
 
-        // ── Bookkeeping: this module now lives on the new device ──
         pr.getPlacedMicroservices().put(moduleName, toDeviceId);
         moduleToApp.put(moduleName, app.getAppId());
 
-        // ── Simulated transfer delay: route via the common ancestor (cloud in this flat topology) ──
         double upDelay   = Math.max(0.0, fromDevice.getUplinkLatency());
         double downDelay = Math.max(0.0, toDevice.getUplinkLatency());
 
@@ -458,7 +342,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         jsonReceive.put("application", app);
         CloudSim.send(fonID, toDeviceId, downDelay, FogEvents.MODULE_RECEIVE, jsonReceive);
 
-        // ── Service discovery: tell clients of this module where it moved to ──
         for (String clientModule : getClientMicroservices(app, moduleName)) {
             Integer clientDeviceId = pr.getPlacedMicroservices().get(clientModule);
             if (clientDeviceId == null) continue;
@@ -472,7 +355,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
             add.put("action", "ADD");
             CloudSim.send(fonID, clientDeviceId, downDelay, FogEvents.UPDATE_SERVICE_DISCOVERY, add);
         }
-        // ── Tell the new device where this module's own dependencies currently live ──
         for (String serviceModule : getServiceMicroservices(app, moduleName)) {
             Integer serviceDeviceId = pr.getPlacedMicroservices().get(serviceModule);
             if (serviceDeviceId == null) continue;
@@ -532,10 +414,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         PLACEMENT_LOG.add(entry);
     }
 
-    // -------------------------------------------------------------------------
-    // AppEdge helpers (service-discovery direction lookups, generic — no clustering needed)
-    // -------------------------------------------------------------------------
-
     /** Modules that call INTO moduleName (i.e. need to know where it lives). */
     private List<String> getClientMicroservices(Application app, String moduleName) {
         List<String> result = new ArrayList<>();
@@ -560,10 +438,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         return result;
     }
 
-    // -------------------------------------------------------------------------
-    // Utility helpers
-    // -------------------------------------------------------------------------
-
     protected double getModuleMips(String moduleName, Application app) {
         for (AppModule m : app.getModules()) {
             if (m.getName().equals(moduleName)) return m.getMips();
@@ -587,10 +461,6 @@ public class PPOBridgePlacementLogic extends ClusteredMicroservicePlacementLogic
         }
         return null;
     }
-
-    // -------------------------------------------------------------------------
-    // Minimal hand-rolled JSON helpers (top-level object with array-valued sections)
-    // -------------------------------------------------------------------------
 
     /** Parses a flat top-level object like {"placements":[...],"migrations":[...]} into raw section strings. */
     private static Map<String, String> parseFlatOrArraySections(String json) {

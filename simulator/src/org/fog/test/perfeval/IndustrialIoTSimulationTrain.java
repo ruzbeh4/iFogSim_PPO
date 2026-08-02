@@ -33,8 +33,7 @@ import org.fog.utils.distribution.SeededUniformDistribution;
 import java.util.*;
 
 /**
- * TRAINING ENVIRONMENT – identical to IndustrialIoTSimulation4
- * but seeds are derived from episode number.
+ * Training episode entry: same Industrial IoT scenario as Simulation4, seeded by episode id.
  */
 public class IndustrialIoTSimulationTrain {
 
@@ -47,7 +46,6 @@ public class IndustrialIoTSimulationTrain {
     static int e2eLoopId = -1;
     static int criticalE2eLoopId = -1;
 
-    // ── Topology Limits ──
     static int NUM_FOG_GATEWAYS    = 10;
     static int CLIENTS_PER_GATEWAY = 15;
     static final int CLOUD_MIPS  = 500_000;
@@ -58,21 +56,15 @@ public class IndustrialIoTSimulationTrain {
     static final double MOBILITY_SAMPLE_S = 15.0;
     static final double MOBILITY_MIN_SPEED_MPS = 0.8;
     static final double MOBILITY_MAX_SPEED_MPS = 1.8;
-    // At the required 15+ fog / 150+ gadget scale, each fog gateway serves
-    // ten clients. Normal traffic stays steady while critical alarms follow
-    // a seeded incident timeline: rare background alerts plus short bursts.
     static final double PERIODIC_MEAN_S = 25.0;
     static final double CRITICAL_BACKGROUND_MEAN_S = 320.0;
     static final double CRITICAL_INCIDENT_MEAN_S = 35.0;
     static final double CRITICAL_INCIDENT_GAP_MEAN_S = 900.0;
     static final double CRITICAL_INCIDENT_DURATION_MIN_S = 45.0;
     static final double CRITICAL_INCIDENT_DURATION_MAX_S = 120.0;
-	// Industrial-control latency budget: seeded per critical event, not a
-	// launcher setting. This creates mixed tight/relaxed critical workloads.
-	static final double CRITICAL_DEADLINE_MIN_MS = 300.0;
-	static final double CRITICAL_DEADLINE_MAX_MS = 500.0;
+    static final double CRITICAL_DEADLINE_MIN_MS = 300.0;
+    static final double CRITICAL_DEADLINE_MAX_MS = 500.0;
 
-    // Dynamic Seeds (set in main)
     static long SEED_SELECTIVITY;
     static long SEED_TRAFFIC;
     static long SEED_DEVICE_TYPE;
@@ -110,21 +102,11 @@ public class IndustrialIoTSimulationTrain {
             SEED_TRAFFIC     = seedStream.nextLong();
             SEED_DEVICE_TYPE = seedStream.nextLong();
             SEED_MOBILITY    = seedStream.nextLong();
-            // Domain randomisation: topology size, mobile share, capacity and
-            // traffic/selectivity all change reproducibly with episodeSeed.
-            // Assignment-scale topology: 15–16 fog gateways and 150–160
-            // gadgets. The seed still randomizes the gateway count, mobility,
-            // capacity and workload characteristics from episode to episode.
             NUM_FOG_GATEWAYS = 15 + seedStream.nextInt(2);      // 15..16
             CLIENTS_PER_GATEWAY = 10;                            // 150..160 total
             MOBILE_SHARE = 0.40 + seedStream.nextDouble() * 0.40;
-			// A gateway serves CLIENTS_PER_GATEWAY requests. The placement layer
-			// reserves 500 + 2000 + 800 MIPS when all services are local, so the
-			// old fixed 18–24k gateway was structurally unable to host its own
-			// workload (10–18 requests) and forced chronic cloud queues. Size the
-			// gateway from the seeded topology and retain 20% migration headroom.
-			FOG_GW_MIPS = Math.max(30_000, (int) Math.ceil(
-					CLIENTS_PER_GATEWAY * 3_300.0 * 1.20));
+            FOG_GW_MIPS = Math.max(30_000, (int) Math.ceil(
+                    CLIENTS_PER_GATEWAY * 3_300.0 * 1.20));
             MicroservicePlacementConfig.PLACEMENT_INTERVAL =
                     Double.parseDouble(System.getProperty("ifogsim.placement.interval", "10"));
             org.fog.utils.Config.MAX_SIMULATION_TIME =
@@ -135,7 +117,6 @@ public class IndustrialIoTSimulationTrain {
                     + ", mobileShare=" + String.format(Locale.ROOT, "%.2f", MOBILE_SHARE)
                     + ", fogMips=" + FOG_GW_MIPS);
         } else {
-            // Preserve the original training entry's seed mapping.
             SEED_SELECTIVITY = episodeSeed * 101L;
             SEED_TRAFFIC     = episodeSeed * 202L;
             SEED_DEVICE_TYPE = episodeSeed * 404L;
@@ -177,9 +158,6 @@ public class IndustrialIoTSimulationTrain {
             List<PlacementRequest> placementRequests = new ArrayList<>();
             for (FogDevice dev : fogDevices) {
                 if (((MicroserviceFogDevice) dev).getDeviceType().equals(MicroserviceFogDevice.CLIENT)) {
-                    // Preserve the existing GA initialization schema: the local
-                    // preprocessor starts on its client. It is still included in
-                    // the shared PPO actor set and may migrate on later steps.
                     Map<String, Integer> prePlaced = new HashMap<>();
                     prePlaced.put("data_preprocessor", dev.getId());
                     placementRequests.add(new PlacementRequest(APP_ID, dev.getId(), dev.getId(), prePlaced));
@@ -189,7 +167,6 @@ public class IndustrialIoTSimulationTrain {
             controller.submitPlacementRequests(placementRequests, 0);
             TimeKeeper.getInstance().setSimulationStartTime(Calendar.getInstance().getTimeInMillis());
 
-            // Kick off PPO heartbeat
             CloudSim.send(cloud.getId(), cloud.getId(), 0, org.fog.utils.FogEvents.PROCESS_PRS, null);
 
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
@@ -327,12 +304,8 @@ public class IndustrialIoTSimulationTrain {
             List<Map<String, Object>> placementLog,
             String host, int port) {
 
-        // ---- Full results (same as IndustrialIoTSimulation4) ----
         try (java.net.Socket socket = new java.net.Socket(host, port)) {
-			TimeKeeper.getInstance().finalizeCriticalTasks();
-            // A shared PPO update/checkpoint runs synchronously on Python after
-            // this message. It can legitimately take longer than the legacy
-            // bridge's 15-second result acknowledgement timeout.
+            TimeKeeper.getInstance().finalizeCriticalTasks();
             socket.setSoTimeout(SHARED_POLICY
                     ? Integer.getInteger("ifogsim.results.timeout.ms", 180_000)
                     : 15_000);
@@ -376,8 +349,6 @@ public class IndustrialIoTSimulationTrain {
             Double averageLatency = completedSamples == 0 ? null
                     : ((normalLoopDelay == null ? 0.0 : normalLoopDelay * normalSamples)
                     + (criticalLoopDelay == null ? 0.0 : criticalLoopDelay * criticalSamples)) / completedSamples;
-            // loopDelay is retained for existing consumers and now means the
-            // completed-task weighted average latency across both task classes.
             sb.append("\"loopDelay\":").append(averageLatency != null ? averageLatency : "null").append(",");
             sb.append("\"averageLatency\":").append(averageLatency != null ? averageLatency : "null").append(",");
             sb.append("\"normalLoopDelay\":").append(normalLoopDelay != null ? normalLoopDelay : "null").append(",");
@@ -499,9 +470,6 @@ public class IndustrialIoTSimulationTrain {
 						criticalTasksMissed, criticalSuccessRate);
             }
 
-            // Wait for Python only after the simulator-side report is visible.
-            // This preserves a useful trajectory report even if Python later
-            // fails while updating or saving a checkpoint.
             in.readLine();
 
         } catch (Exception e) {

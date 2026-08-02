@@ -1,20 +1,19 @@
-# ── Java ─────────────────────────────────────────────────────────────────────
+# Java
 bin/
 **/bin/
 out/
 **/out/
 output/
 **/output/
-results/
-**/results/
 *.class
 .classpath
 .project
 .settings/
 **/.idea/
 **/.vscode/
+*.iml
 
-# ── Python ───────────────────────────────────────────────────────────────────
+# Python
 **/venv/
 **/.venv/
 __pycache__/
@@ -27,14 +26,11 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
-python_agent/results/
-agents/models/shared_ppo_model.pth
-agents/shared_smoke_*.log
 
-# ── macOS ────────────────────────────────────────────────────────────────────
+# Results / logs
+agents/results/
+*.log
+
+# macOS
 .DS_Store
 **/.DS_Store
-*/.DS_Store
-
-simulator/simulator.iml
-iFogSim_PPO.iml

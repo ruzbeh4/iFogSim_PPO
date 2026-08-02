@@ -1,327 +1,746 @@
-# iFogSim2
-A Toolkit for Modeling and Simulation of Resource Management Techniques in Internet of Things, Edge and Fog Computing Environments with the following new features:
- * Mobility-support and Migration Management
-   * Supporting real mobility datasets
-   * Implementing different random mobility models 
- * Microservice Orchestration
- * Dynamic Distributed Clustering
- * Any Combinations of Above-mentioned Features
- * Full Compatibility with the Latest Version of the CloudSim (i.e., (https://github.com/Cloudslab/cloudsim/releases)) and [Previous iFogSim Version](https://github.com/Cloudslab/iFogSim1) and Tutorials
+# پروژه جایگذاری و مهاجرت میکروسرویس‌ها در محیط صنعتی متحرک با iFogSim2 و PPO
 
-iFogSim2 currently encompasses several new usecases such as:
- * Audio Translation Scenario
- * Healthcare Scenario
- * Crowd-sensing Scenario
+این مخزن پیاده‌سازی پروژه آزمایشگاه اینترنت اشیاء (Industry 4.0) است: شبیه‌سازی سناریوی صنعتی متحرک در **iFogSim2 (جاوا)**، تصمیم‌گیری جایگذاری/مهاجرت با عامل‌های **ابتکاری، ژنتیک و یادگیری تقویتی عمیق (PPO)** در **پایتون**، و اتصال پایدار دو سمت از طریق **پل ارتباطی TCP/JSON (Bridge)**.
 
-# How to run iFogSim2 ?
-* Eclipse IDE:
-  * Create a Java project
-  * Inside the project directory, initialize an empty Git repository with the following command:
-  ```
-  git init
-  ```
-  * Add the Git repository of iFogSim2 as the `origin` remote:
-  ```
-  git remote add origin https://github.com/Cloudslab/iFogSim
-  ```
-  * Pull the contents of the repository to your machine:
-  ```
-  git pull origin main
-  ```
-  * Include the JARs to your project  
-  * Run the example files (e.g. TranslationServiceFog_Clustering.java, CrowdSensing_Microservices_RandomMobility_Clustering.java) to get started
-
-* IntelliJ IDEA:
-  * Clone the iFogSim2 Git repository to desired folder:
-  ```
-  git clone https://github.com/Cloudslab/iFogSim
-  ```
-  * Select "project from existing resources" from the "File" drop-down menu
-  * Verify the Java version
-  * Verify the external libraries in the "JARs" Folder are added to the project
-  * Run the example files (e.g. TranslationServiceFog_Clustering.java, CrowdSensing_Microservices_RandomMobility_Clustering.java) to get started
-
+> این سند شرح مسئله، روش پیشنهادی، معماری، جزئیات Bridge، عامل‌ها، جریان آموزش/مقایسه و ساختار کد را پوشش می‌دهد.  
+> **نتایج عددی آزمایش‌ها و تحلیل کمی نمودارها در این README درج نشده‌اند** (برای گزارش جداگانه نگه‌داری می‌شوند).
 
 ---
 
-# Industry 4.0 Extension – Microservice Placement via Python Agents
+## فهرست مطالب
 
-This fork extends iFogSim2 with an **Industry 4.0 simulation scenario** and a
-**Java ↔ Python TCP bridge** that lets any external algorithm (heuristic, genetic,
-PPO/DRL) make placement decisions at runtime without modifying the simulator core.
+1. [شرح مسئله](#۱-شرح-مسئله)
+2. [اهداف و خروجی‌های مورد انتظار پروژه](#۲-اهداف-و-خروجیهای-مورد-انتظار-پروژه)
+3. [روش پیشنهادی و مفاهیم کاری](#۳-روش-پیشنهادی-و-مفاهیم-کاری)
+4. [معماری کلی سامانه](#۴-معماری-کلی-سامانه)
+5. [سناریوی شبیه‌سازی (جاوا)](#۵-سناریوی-شبیهسازی-جاوا)
+6. [پل ارتباطی Java ↔ Python (Bridge)](#۶-پل-ارتباطی-java--python-bridge)
+7. [عامل‌های هوشمند (پایتون)](#۷-عاملهای-هوشمند-پایتون)
+8. [آموزش Shared PPO](#۸-آموزش-shared-ppo)
+9. [چارچوب مقایسه عامل‌ها](#۹-چارچوب-مقایسه-عاملها)
+10. [ساختار پوشه‌ها و اسکریپت‌ها](#۱۰-ساختار-پوشهها-و-اسکریپتها)
+11. [نحوه اجرا](#۱۱-نحوه-اجرا)
+12. [متریک‌های ارزیابی (بدون عدد)](#۱۲-متریکهای-ارزیابی-بدون-عدد)
+13. [نکات پیاده‌سازی و محدودیت‌ها](#۱۳-نکات-پیادهسازی-و-محدودیتها)
 
-## Project Status
+---
 
-| Component | Status |
-|-----------|--------|
-| TCP socket bridge (Java ↔ Python) | ✅ Working |
-| Heuristic agent – Least-Loaded, edge-first | ✅ Working |
-| Genetic Algorithm agent | ✅ Working |
-| Results collection → JSON export | ✅ Working |
-| Estimated E2E latency from placement decisions | ✅ Working |
-| PPO / Deep Reinforcement Learning agent | 🔲 Next step |
-| Comparison charts (latency, energy, migration) | 🔲 Next step |
+## ۱. شرح مسئله
 
-## Scenario – Factory Floor Topology
+### ۱.۱ زمینه
 
+در محیط‌های **Industry 4.0**، حسگرها و ربات‌های متحرک داده تولید می‌کنند و پردازش آن‌ها باید بین **لبه (Fog)** و **ابر (Cloud)** توزیع شود. برنامه‌ها به‌صورت **میکروسرویس** شکسته می‌شوند تا بتوان آن‌ها را روی گره‌های مختلف قرار داد و در صورت نیاز **مهاجرت (Migration)** داد.
+
+چالش اصلی این است که:
+
+- توپولوژی و بار شبکه **پویا** است (حرکت دستگاه‌ها، تغییر گیت‌وی والد).
+- تسک‌ها دو دسته هستند: **دوره‌ای** و **بحرانی با مهلت زمانی (Deadline)**.
+- تصمیم‌گیری باید هم‌زمان به **تأخیر انتهابه‌انتها**، **مصرف انرژی**، **محلیت (Locality)** و **قابلیت‌اجرا روی مهلت بحرانی** توجه کند.
+- شبیه‌ساز iFogSim2 به زبان **جاوا** است، در حالی که مدل‌های DRL معمولاً در **پایتون** توسعه می‌یابند؛ بنابراین نیاز به **Bridge پایدار** است.
+
+### ۱.۲ صورت مسئله پروژه (مطابق مشخصات)
+
+طبق فایل مشخصات پروژه (`IoTLab-Project8.pdf`):
+
+| بخش | شرح |
+|-----|-----|
+| عنوان | زمانبندی و جایگذاری میکروسرویس‌ها در محیط‌های صنعتی متحرک با استفاده از iFogSim2 |
+| Fog | حدود ۵ تا ۱۵ گره مه (مثلاً Gateway صنعتی) + یک سرور ابری |
+| میکروسرویس‌ها | ۱) پیش‌پردازش/فیلتر داده ۲) تحلیل هوشمند ۳) کنترل عملگر |
+| IoT | حدود ۱۰۰ تا ۲۰۰ دستگاه (سنسور ثابت + ربات متحرک) |
+| تحرک | Random Waypoint یا مسیر از پیش‌تعیین‌شده؛ تغییر پوشش بین گره‌های مه |
+| تسک‌ها | دوره‌ای (پایش) و بحرانی (اخطار/توقف اضطراری با اولویت بالاتر) |
+
+سه مکانیزم تصمیم‌گیری باید پیاده و مقایسه شوند:
+
+1. **عامل ابتکاری (Heuristic)** به‌عنوان خط پایه  
+2. **الگوریتم ژنتیک (Genetic Algorithm)** برای بهینه‌سازی چیدمان اولیه  
+3. **یادگیری تقویتی عمیق (ترجیحاً PPO)** برای تصمیم برخط جایگذاری/مهاجرت و Offload
+
+### ۱.۳ مسئله تصمیم‌گیری به زبان فنی
+
+در هر لحظه شبیه‌سازی باید مشخص شود:
+
+- هر میکروسرویس روی **کدام دستگاه** (کلاینت / Fog Gateway / Cloud) اجرا شود؛
+- آیا نیاز به **مهاجرت** از دستگاه فعلی به دستگاه دیگر هست؛
+- تسک‌های تولیدی به کجا **Offload** شوند (در عمل، اجرای تسک روی گره‌ای که میکروسرویس مربوطه روی آن قرار گرفته است).
+
+تصمیم‌ها باید در حضور **حرکت**، **محدودیت ظرفیت (MIPS/RAM)**، و **مهلت تسک‌های بحرانی** گرفته شوند.
+
+---
+
+## ۲. اهداف و خروجی‌های مورد انتظار پروژه
+
+1. مدل‌سازی سناریوی صنعتی متحرک در iFogSim2.  
+2. طراحی Bridge جاوا↔پایتون برای تبادل State/Action به‌صورت برخط.  
+3. پیاده‌سازی سه خانواده عامل: ابتکاری، ژنتیک، PPO.  
+4. امکان آموزش PPO و مقایسه عادلانه روی seedهای یکسان.  
+5. تولید نمودارهای مقایسه‌ای مورد نیاز گزارش (میانگین تأخیر، انرژی، تعداد مهاجرت سرویس، نرخ موفقیت تسک بحرانی، همگرایی پاداش).
+
+این README روی **چگونگی کارکرد کد و مفاهیم** تمرکز دارد؛ نمودارها و اعداد در پوشه `agents/results/` تولید می‌شوند و باید در گزارش جداگانه تحلیل شوند.
+
+---
+
+## ۳. روش پیشنهادی و مفاهیم کاری
+
+### ۳.۱ جدایی «جایگذاری اولیه» و «مهاجرت برخط»
+
+در پیاده‌سازی فعلی مسیر اصلی (`shared policy`)، دو فاز متمایز وجود دارد:
+
+| فاز | زمان | نقش |
+|-----|------|-----|
+| **جایگذاری اولیه (Initial Placement)** | گام صفر شبیه‌سازی | تعیین محل اولیه میکروسرویس‌های در انتظار |
+| **مهاجرت برخط (Online Migration)** | گام‌های بعدی با فاصله `placement.interval` | جابه‌جایی سرویس‌های از قبل قرارگرفته بر اساس وضعیت فعلی |
+
+این تفکیک امکان مقایسه ترکیبات مختلف را می‌دهد؛ مثلاً:
+
+- ژنتیک فقط برای init + بدون مهاجرت  
+- ژنتیک برای init + Heuristic برای مهاجرت  
+- ژنتیک برای init + PPO برای مهاجرت  
+- Heuristic-v2 برای init + PPO برای مهاجرت  
+
+### ۳.۲ سیاست اشتراکی در سطح سرویس (Shared Service-Level Policy)
+
+به‌جای یک بردار اکشن خیلی بزرگ برای همه ماژول‌ها، در گام‌های مهاجرت هر **بازیگر سرویس (Service Actor)** به‌صورت جداگانه تصمیم می‌گیرد. هر actor معمولاً به شکل `requestId:moduleName` شناخته می‌شود و لیست **کاندیدهای دستگاه** را با پرچم `feasible` می‌بیند.
+
+مزایا:
+
+- اندازه اکشن متغیر و قابل‌ماسک شدن است؛
+- پاداش می‌تواند **به‌ازای همان درخواست/سرویس** شکل بگیرد؛
+- می‌توان در هر گام فقط زیرمجموعه‌ای از actorها را (با round-robin) به پایتون فرستاد (`max.actors.per.step`).
+
+### ۳.۳ Offload در این مدل
+
+در این پروژه، Offload ابری به‌معنای «اجرای تسک بدون میکروسرویس» نیست. اگر پردازش باید در ابر انجام شود، میکروسرویس مربوطه باید آنجا **قرار داده یا مهاجرت داده** شده باشد. بنابراین تصمیم PPO/Heuristic در عمل همان **Placement/Migration میکروسرویس** است.
+
+### ۳.۴ جریان مفهومی یک اپیزود آموزش/مقایسه
+
+```text
+[اسکریپت train/compare]
+   ├─ سرور پایتون روی پورت TCP گوش می‌دهد
+   └─ برای هر seed: جاوا IndustrialIoTSimulationTrain را اجرا می‌کند
+         │
+         ├─ t≈0 : shared_initial  → جایگذاری اولیه (GA / Heuristic / Heuristic-v2 / …)
+         │
+         ├─ هر PLACEMENT_INTERVAL :
+         │     shared_step → لیست actors + پاداش گام قبل
+         │                 ← actions (مهاجرت یا ماندن)
+         │
+         └─ پایان شبیه‌سازی: type=results → ذخیره JSON اپیزود (+ به‌روزرسانی PPO در حالت آموزش)
 ```
-Cloud  (CLOUD, level 0, 44 800 MIPS)
-  ├── FogGW-0  (FCN, level 1, 4 000 MIPS, 100 ms to cloud)
-  │     ├── IoT-0-0 / IoT-0-1 / IoT-0-2  (CLIENT, level 2, 20 ms to gateway)
-  ├── FogGW-1  (FCN) ── IoT-1-0 / IoT-1-1 / IoT-1-2
-  ├── FogGW-2  (FCN) ── IoT-2-0 / IoT-2-1 / IoT-2-2
-  ├── FogGW-3  (FCN)  ← spare compute, no clients
-  └── FogGW-4  (FCN)  ← spare compute, no clients
+
+---
+
+## ۴. معماری کلی سامانه
+
+```text
+┌──────────────────────────────────────────────┐
+│                 Python (agents/)             │
+│  servers.train / servers.compare / scenario  │
+│  HeuristicAgent / GeneticAgent / SharedPPO   │
+│  PPO update, checkpoint, plots               │
+└──────────────────────▲───────────────────────┘
+                       │ TCP، یک خط JSON در هر تبادل
+                       │ (اتصال تازه برای هر پیام)
+┌──────────────────────▼───────────────────────┐
+│              Java (simulator/)               │
+│  IndustrialIoTSimulationTrain                │
+│  TrainingMobilityController                  │
+│  SharedPolicyPPOBridgePlacementLogic         │
+│  iFogSim2 / CloudSim هسته رویدادی            │
+└──────────────────────────────────────────────┘
 ```
 
-Each fog gateway holds exactly one SA+AC pair (2 800 MIPS) with 1 200 MIPS headroom,
-creating genuine capacity scarcity that forces algorithms to make real placement tradeoffs.
+| لایه | مسیر اصلی | مسئولیت |
+|------|-----------|---------|
+| شبیه‌ساز | `simulator/src/...` | توپولوژی، تحرک، انرژی، حلقه‌های App، تسک بحرانی |
+| Bridge | `.../placement/*Bridge*PlacementLogic.java` | ساخت State، اعمال Action، مهاجرت |
+| عامل‌ها | `agents/agents/` | سیاست جایگذاری/مهاجرت |
+| سرورها | `agents/servers/` | گوش‌دادن TCP و مسیریابی پیام‌ها |
+| اجرا | `scripts/train.sh`, `scripts/compare.sh` | کامپایل، راه‌اندازی سرور، حلقه seed |
 
-Application pipeline (`industrial_iot`):
+شناسه‌های منطق جایگذاری در `PlacementLogicFactory`:
 
+| ثابت | مقدار | کلاس |
+|------|-------|------|
+| `PYTHON_BRIDGE_PLACEMENT` | 4 | `PythonBridgePlacementLogic` (یک‌باره، مسیر قدیمی) |
+| `PPO_BRIDGE_PLACEMENT` | 5 | `PPOBridgePlacementLogic` (گام‌به‌گام قدیمی) |
+| `SHARED_PPO_BRIDGE_PLACEMENT` | 6 | `SharedPolicyPPOBridgePlacementLogic` (**مسیر اصلی train/compare**) |
+
+---
+
+## ۵. سناریوی شبیه‌سازی (جاوا)
+
+### ۵.۱ نقطه ورود
+
+کلاس اصلی آموزش و مقایسه:
+
+`simulator/src/org/fog/test/perfeval/IndustrialIoTSimulationTrain.java`
+
+- آرگومان خط فرمان: **شماره seed اپیزود**  
+- با `-Difogsim.shared.policy=true` حالت سیاست اشتراکی فعال می‌شود.
+
+### ۵.۲ توپولوژی سلسله‌مراتبی
+
+```text
+سطح 0: cloud
+سطح 1: FogGW-0 … FogGW-(N-1)     (FCN / gateway صنعتی)
+سطح 2: MobileRobot-* / FixedSensor-*   (CLIENT / IoT)
 ```
-IoT_SENSOR →[UP]→ data_preprocessor →[UP]→ smart_analyzer
-                       ↑                          ↓
-                  ACTUATOR ←[DOWN]← actuator_controller
+
+ثابت‌های مهم تأخیر لینک (نمونه‌ای از کد):
+
+- `IOT_TO_GW_LATENCY = 20` ms  
+- `GW_TO_CLOUD_LATENCY = 100` ms  
+
+در حالت shared-policy، اندازه توپولوژی با seed تصادفی‌سازی می‌شود (مثلاً ۱۵–۱۶ gateway و حدود ۱۰ کلاینت به‌ازای هر gateway). ظرفیت MIPS دروازه نیز متناسب با تعداد کلاینت تنظیم می‌شود تا میزبانی محلی از نظر ساختاری ممکن باشد.
+
+### ۵.۳ میکروسرویس‌ها و یال‌های برنامه
+
+برنامه با شناسه `industrial_iot` شامل:
+
+| ماژول | نقش تقریبی |
+|-------|------------|
+| `data_preprocessor` | پیش‌پردازش روی کلاینت (در init معمولاً از قبل روی همان دستگاه کلاینت قرار می‌گیرد) |
+| `smart_analyzer` | تحلیل هوشمند |
+| `actuator_controller` | کنترل عملگر |
+
+جریان داده (خلاصه): سنسور → preprocessor → analyzer → actuator_controller → عملگر.
+
+دو **AppLoop** برای سنجش تأخیر انتهابه‌انتها تعریف می‌شود: حلقه عادی و حلقه بحرانی.
+
+### ۵.۴ تحرک (Mobility)
+
+کنترلر: `TrainingMobilityController`
+
+- برای ربات‌های متحرک، ردپای حرکت seeded ساخته می‌شود (نمونه‌برداری دوره‌ای، محدوده سرعت، شبکه فاصله gateway).  
+- تغییر والد (parent) کلاینت منجر به رویدادهای مدیریت تحرک و در صورت نیاز مهاجرت نسبی ماژول‌ها می‌شود.  
+- این پویایی، نیاز به مهاجرت برخط را توجیه می‌کند.
+
+### ۵.۵ تسک‌های دوره‌ای و بحرانی
+
+هر کلاینت معمولاً:
+
+- سنسور دوره‌ای با توزیع نمایی seeded؛  
+- سنسور بحرانی با الگوی **incident** (پس‌زمینه نادر + بازه‌های هشدار متراکم‌تر)؛  
+- مهلت بحرانی به‌صورت seeded در بازه مشخصی از میلی‌ثانیه نمونه‌برداری می‌شود.
+
+در پایان اپیزود، شمارنده‌هایی مانند تعداد تسک بحرانی، on-time / missed / pending و نرخ موفقیت در JSON نتایج قرار می‌گیرد.
+
+### ۵.۶ ویژگی‌های سیستمی مهم (`-D`)
+
+| ویژگی | نقش |
+|--------|-----|
+| `ifogsim.shared.policy` | فعال‌سازی SharedPolicy bridge |
+| `ifogsim.episode.seed` | seed اپیزود |
+| `ifogsim.bridge.host` / `ifogsim.bridge.port` | آدرس سرور پایتون |
+| `ifogsim.simulation.time` | طول شبیه‌سازی |
+| `ifogsim.placement.interval` | فاصله تیک مهاجرت |
+| `ifogsim.max.actors.per.step` | سقف actor در هر `shared_step` |
+| `ifogsim.results.timeout.ms` | مهلت ارسال نتایج به پایتون |
+| `ifogsim.log.summary` / `decisions` / `diagnostics` | سطح لاگ |
+
+---
+
+## ۶. پل ارتباطی Java ↔ Python (Bridge)
+
+### ۶.۱ اصول مشترک
+
+- پروتکل: **TCP**، پیام‌ها **یک خط JSON** (newline-terminated).  
+- برای هر تبادل معمولاً یک **اتصال تازه** باز می‌شود تا چند نمونه FON بتوانند با یک سرور پایتون کار کنند.  
+- جاوا State می‌سازد و Action را اعمال می‌کند؛ پایتون سیاست را محاسبه می‌کند.
+
+سه لایه Bridge در پروژه وجود دارد؛ مسیر عملیاتی فعلی train/compare لایه سوم است.
+
+---
+
+### ۶.۲ `PythonBridgePlacementLogic` (جایگذاری یک‌باره)
+
+**مسیر فایل:** `simulator/src/org/fog/placement/PythonBridgePlacementLogic.java`
+
+کاربرد تاریخی/سناریوهای قدیمی: یک دور جایگذاری در زمان شروع.
+
+**State (جاوا → پایتون):**
+
+```json
+{
+  "step": 0,
+  "devices": [
+    {"id": 1, "name": "...", "level": 1, "parentId": 0,
+     "availableMips": ..., "availableRam": ..., "currentLoad": ...}
+  ],
+  "requests": [
+    {
+      "requestId": 101,
+      "appId": "industrial_iot",
+      "gatewayDeviceId": ...,
+      "alreadyPlaced": {"data_preprocessor": 12},
+      "pendingModules": [
+        {"name": "smart_analyzer", "requiredMips": ..., "requiredRam": ...}
+      ]
+    }
+  ],
+  "allModules": ["data_preprocessor", "smart_analyzer", "actuator_controller"]
+}
 ```
 
-| Module | Placed by | MIPS | Role |
-|--------|-----------|-----:|------|
-| `data_preprocessor` | Pre-placed on CLIENT | 500 | Edge filter |
-| `smart_analyzer` | Python agent | 2 000 | ML inference |
-| `actuator_controller` | Python agent | 800 | Control loop |
+**Action (پایتون → جاوا):**
 
-## Metrics
-
-Since iFogSim2 microservices mode does not wire up TimeKeeper loop tracking or
-the CloudSim network counter, the following metrics are used for algorithm comparison:
-
-| Metric | Source | Notes |
-|--------|--------|-------|
-| Total energy (J) | `FogDevice.getEnergyConsumption()` | Primary efficiency metric |
-| Energy per device | same | Shows cloud vs edge load distribution |
-| Cloud cost | `FogDevice.getTotalCost()` | Reflects cloud compute usage |
-| Estimated E2E latency | Computed from placement level + topology constants | 20 ms fog / 120 ms cloud from IoT |
-| Edge utilization % | Placement log | Fraction of modules placed on fog/IoT |
-
-Results are saved automatically to `python_agent/results/<agent>_<timestamp>.json`
-after each simulation run.
-
-## File Structure
-
+```json
+{
+  "placement": {
+    "101": {"smart_analyzer": 5, "actuator_controller": 5}
+  }
+}
 ```
+
+---
+
+### ۶.۳ `PPOBridgePlacementLogic` (حلقه گام‌به‌گام قدیمی)
+
+**مسیر فایل:** `simulator/src/org/fog/placement/PPOBridgePlacementLogic.java`
+
+در حالت PERIODIC، هر `PLACEMENT_INTERVAL` یک پیام `"type":"step"` با فیلدهای `step`, `simTime`, `done`, `reward`, `devices`, `modules` ارسال می‌شود و پاسخ شامل آرایه‌های `placements` و `migrations` است.
+
+پاداش میراثی تقریباً به‌صورت منفی ترکیب انرژی و تأخیر تعریف شده است. این مسیر بیشتر برای سازگاری با سناریوهای قدیمی است؛ مسیر اصلی پروژه shared policy است.
+
+---
+
+### ۶.۴ `SharedPolicyPPOBridgePlacementLogic` (مسیر اصلی)
+
+**مسیر فایل:** `simulator/src/org/fog/placement/SharedPolicyPPOBridgePlacementLogic.java`  
+**ارث‌بری از:** `PPOBridgePlacementLogic` (برای ابزار مهاجرت/لاگ و سوکت)
+
+#### گام صفر — `shared_initial`
+
+هدف: استفاده از همان اسکیمای جایگذاری که Genetic/Heuristic می‌فهمند.
+
+جاوا می‌فرستد:
+
+- `type`: `"shared_initial"`
+- `episodeSeed`, `step: 0`
+- `devices` (فرمت legacy با `availableMips` / `availableRam` / `currentLoad`)
+- `requests` و `allModules` مشابه Bridge یک‌باره
+
+پایتون برمی‌گرداند:
+
+```json
+{
+  "placements": [
+    {"requestId": 101, "module": "smart_analyzer", "deviceId": 5}
+  ],
+  "migrations": []
+}
+```
+
+#### گام‌های بعدی — `shared_step`
+
+جاوا برای زیرمجموعه‌ای از سرویس‌ها actor می‌سازد. نمونه فیلدهای هر actor:
+
+| فیلد | مفهوم |
+|------|--------|
+| `actorId` | رشته `"requestId:module"` |
+| `currentDeviceId` / `currentLevel` | محل فعلی |
+| `currentLatency` | برآورد تأخیر فعلی درخواست |
+| `homeGatewayId` | گیت‌وی مه خانه (والد gateway کلاینت) |
+| `mobileClient` | آیا کلاینت متحرک است |
+| `reward` | شیء پاداش گام قبل برای همین actor |
+| `candidates[]` | گزینه‌های دستگاه با ویژگی‌ها و `feasible` |
+
+نمونه پاسخ پایتون:
+
+```json
+{
+  "actions": [
+    {"actorId": "101:smart_analyzer", "toDeviceId": 7}
+  ]
+}
+```
+
+اگر `toDeviceId` برابر دستگاه فعلی باشد، عملاً **ماندن** است؛ در غیر این صورت مهاجرت (در صورت ظرفیت کافی) اعمال می‌شود. نتیجه (`migrated` / `rejected` / `no_op`) در گام بعد روی پاداش اثر می‌گذارد.
+
+در پایان اپیزود، اگر شبیه‌سازی تمام نشده باشد، همان PlacementRequestها دوباره با تأخیر `PLACEMENT_INTERVAL` به صف ارسال می‌شوند تا تیک بعدی رخ دهد.
+
+#### پایان اپیزود — `results`
+
+`IndustrialIoTSimulationTrain.sendResultsToPython` یک JSON با `"type":"results"` می‌فرستد شامل انرژی، هزینه ابر، تأخیرها، آمار تسک بحرانی، `meanLocalReward`، لاگ placements/migrations و غیره. سرور پایتون آن را ذخیره می‌کند و در حالت آموزش PPO را به‌روز می‌کند، سپس یک خط تأیید برمی‌گرداند.
+
+---
+
+### ۶.۵ تابع پاداش مثبت در Shared Policy
+
+متد `buildPositiveReward` در `SharedPolicyPPOBridgePlacementLogic` پاداش را **مثبت و شکل‌دهی‌شده** می‌سازد (نه فقط منفی خام). اجزا:
+
+| مؤلفه | ایده |
+|--------|------|
+| `latencyScore` | هرچه تأخیر کمتر، امتیاز بالاتر: \(1/(1 + L/500)\) |
+| `energyScore` | حساس به دلتای انرژی نسبی ماژول روی میزبان |
+| `deadlineScore` | نزدیکی به مهلت بحرانی میانگین |
+| `localityScore` | ابر = ۰؛ home fog/کلاینت = ۱؛ سایر fog ≈ ۰٫۶۵ |
+| `actionPenalty` | جریمه رد مهاجرت یا خود مهاجرت |
+
+ترکیب وزن‌دار تقریبی:
+
+\[
+R = 0.30\,L + 0.20\,E + 0.30\,D + 0.20\,Loc - Penalty
+\]
+
+این \(R\) داخل فیلد `reward.total` به پایتون می‌رسد و Shared PPO برای هدف TD از آن استفاده می‌کند.
+
+---
+
+## ۷. عامل‌های هوشمند (پایتون)
+
+پکیج: `agents/agents/`
+
+### ۷.۱ پایه مشترک — `base_agent.py`
+
+کلاس انتزاعی `BasePlacementAgent`:
+
+- `candidate_devices(state)`: دستگاه‌های واجد شرایط با `level < 2` (معمولاً cloud + fog؛ نه کلاینت به‌عنوان میزبان عادی پردازش سنگین، مگر منطق جدا).  
+- `available_mips(device)`  
+- `build_action(placement_map)` → `{"placement": {...}}`
+
+---
+
+### ۷.۲ عامل ابتکاری — `heuristic.py`
+
+#### حالت خوب (`bad_placement=False`)
+
+برای هر ماژول در انتظار:
+
+1. شناسایی **home fog** از روی `gatewayDeviceId` درخواست و `parentId` آن؛  
+2. مرتب‌سازی کاندیدها با اولویت: home → غیرابر → سطح بالاتر → بیشترین MIPS آزاد؛  
+3. انتخاب اولین دستگاه با ظرفیت کافی MIPS/RAM.
+
+این سیاست خط پایه قوی برای محلیت و تأخیر است.
+
+#### حالت Heuristic-v2 (`bad_placement=True`)
+
+جایگذاری اولیه عمداً ضعیف است تا سیاست مهاجرت چیزی برای «تعمیر» داشته باشد:
+
+- ترجیح **ابر**؛  
+- اجتناب از home fog؛  
+- بسته‌بندی روی دستگاه‌های شلوغ‌تر.
+
+**مهاجرت برخط** (`decide_step`) همیشه با منطق «خوب» انجام می‌شود (ترجیح home gateway، سپس غیرابر/لبه، سپس MIPS آزاد) و با سقف `max_migrations` در هر گام محدود می‌شود. خروجی:
+
+```json
+{"actions": [{"actorId": "...", "toDeviceId": 123}]}
+```
+
+---
+
+### ۷.۳ الگوریتم ژنتیک — `genetic.py`
+
+هدف: بهینه‌سازی **سراسری چیدمان اولیه** با کمینه‌کردن هزینه ترکیبی تأخیر و انرژی.
+
+#### کدگذاری
+
+- یک **کروموزوم**: لیست اندیس دستگاه در میان کاندیدها، به‌ازای هر جفت `(request, pendingModule)`.
+
+#### برازندگی (Fitness)
+
+تقریباً:
+
+\[
+fitness = w_L \cdot latency\_cost + w_E \cdot energy\_cost + infeasibility
+\]
+
+با وزن‌های نمونه `W_LATENCY=0.6`, `W_ENERGY=0.4`.  
+تأخیر با سطح سلسله‌مراتب و حساسیت ماژول (`LATENCY_WEIGHTS`) تقریب زده می‌شود؛ انرژی با تمرکز بار نسبی MIPS مرتبط است.
+
+#### پارامترهای نمونه GA
+
+| پارامتر | مقدار نمونه در کد |
+|---------|-------------------|
+| `POP_SIZE` | 50 |
+| `MAX_GENERATIONS` | 100 |
+| `MUTATION_RATE` | 0.1 |
+| `ELITE_FRAC` | 0.1 |
+| `TOURNAMENT_K` | 5 |
+
+خروجی همان قالب `placement` است که Bridge یک‌باره می‌فهمد. در مسیر shared، سرور compare/train آن را به آرایه `placements` تخت تبدیل می‌کند.
+
+GA در این پروژه عمدتاً برای **init** استفاده می‌شود؛ مهاجرت بعدی یا خالی است، یا Heuristic، یا PPO.
+
+---
+
+### ۷.۴ Shared PPO — `shared_ppo.py`
+
+این عامل اصلی DRL مسیر train/compare است.
+
+#### اجزا
+
+- شبکه Actor-Critic روی بردار ویژگی هر کاندید (`FEATURE_DIM=20`)  
+- توزیع Categorical با ماسک `feasible`  
+- بهینه‌ساز Adam، به‌روزرسانی PPO با clipping  
+- ذخیره `model.pth` و تاریخچه `convergence.json`
+
+#### `placement_init`
+
+| مقدار | جایگذاری اولیه |
+|--------|----------------|
+| `genetic` | پیش‌فرض آموزش GA+PPO |
+| `heuristic` | Heuristic خوب |
+| `bad_heuristic` | Heuristic-v2 (ضعیف) |
+
+#### `decide_initial`
+
+seed کردن RNG با `episodeSeed`، اجرای GA/Heuristic، برگرداندن `placements`.
+
+#### `decide_step`
+
+برای هر actor:
+
+1. ساخت تنسور ویژگی‌ها برای همه کاندیدها؛  
+2. ماسک غیرفعال برای گزینه‌های غیرممکن؛  
+3. اگر سقف مهاجرت گام پر شده باشد، فقط ماندن روی دستگاه فعلی مجاز است؛  
+4. در آموزش: نمونه‌گیری از سیاست؛ در استنتاج: `argmax`؛  
+5. رزرو موقت CPU داخل همان batch برای جلوگیری از oversubscribe.
+
+نمونه ابعاد ویژگی (خلاصه مفهومی): نوع ماژول، نیاز MIPS/RAM نرمال‌شده، متحرک بودن کلاینت، سطح فعلی/کاندید، پرچم home/current/peer، utilization، تأخیر تخمینی و دلتای آن، انرژی، فاصله تا کلاینت، feasibility.
+
+#### یادگیری
+
+پاداش از جاوا (`reward.total`) خوانده می‌شود؛ انتقال‌ها با \(\gamma\) و value شبکه هدف TD می‌سازند؛ سپس چند اپوک PPO روی minibatchها اجرا می‌شود.
+
+هایپرپارامترهای نمونه: `GAMMA=0.98`, `CLIP_EPS=0.2`, `ENTROPY_COEF=0.01`, `LEARNING_RATE=3e-4`, `PPO_EPOCHS=6`.
+
+---
+
+### ۷.۵ PPO قدیمی سناریو — `ppo.py`
+
+برای `servers/scenario.py` و پروتکل `"type":"step"` قدیمی. با Shared PPO یکی نیست و مسیر اصلی آموزش فعلی نیست، ولی برای سازگاری سناریوهای قبلی نگه داشته شده است.
+
+---
+
+## ۸. آموزش Shared PPO
+
+### ۸.۱ سرور — `agents/servers/train.py`
+
+- پیام‌های `shared_initial` / `shared_step` / `results` را به `SharedPPOAgent` می‌سپارد.  
+- فلگ `--inference` آموزش را خاموش می‌کند.  
+- `--placement-init` نوع init را تعیین می‌کند.  
+- `--max-migrations` سقف مهاجرت در هر گام را به عامل می‌دهد.
+
+### ۸.۲ لانچر — `scripts/train.sh` (و `./train.sh` در ریشه)
+
+جریان:
+
+1. ساخت پوشه نتایج روزانه: `agents/results/<تاریخ>/single/<run-name>/`  
+2. مدیریت `model.pth` (ادامه از همان run، یا seed از آخرین مدل، یا `--reset-training`)  
+3. کامپایل اختیاری جاوا  
+4. اجرای سرور پایتون در پس‌زمینه  
+5. حلقه اپیزود: `IndustrialIoTSimulationTrain <seed>` با `-Difogsim.shared.policy=true`
+
+فلگ‌های مهم:
+
+| فلگ | مفهوم |
+|-----|--------|
+| `--episodes` / `--start-seed` | تعداد و شروع seed |
+| `--run-name` | نام پوشه run |
+| `--placement-init` | `genetic` / `heuristic` / `bad_heuristic` |
+| `--max-migrations` | سقف مهاجرت PPO در هر گام |
+| `--placement-interval` | فاصله تیک جاوا |
+| `--simulation-time` | طول شبیه‌سازی |
+| `--reset-training` | پاک کردن مدل و convergence |
+| `--skip-compile` | رد شدن از javac |
+
+مثال مفهومی آموزش GA + PPO از صفر:
+
+```bash
+bash train.sh --episodes 100 --start-seed 1 --run-name shared_ppo_scratch \
+  --reset-training --placement-init genetic \
+  --max-migrations 4 --placement-interval 5 --skip-compile
+```
+
+مثال آموزش با init از نوع Heuristic-v2:
+
+```bash
+bash train.sh --episodes 100 --start-seed 1 --run-name shared_ppo_heur_v2 \
+  --reset-training --placement-init bad_heuristic \
+  --max-migrations 4 --placement-interval 5 --skip-compile
+```
+
+---
+
+## ۹. چارچوب مقایسه عامل‌ها
+
+### ۹.۱ سرور — `agents/servers/compare.py`
+
+یک عامل در هر بار اجرا (`--agent`) انتخاب می‌شود تا مقایسه روی seedهای یکسان **عادلانه** باشد (هر عامل جداگانه همان اپیزودهای جاوا را می‌بیند).
+
+#### جدول ترکیب Placement + Migration
+
+| شناسه عامل | جایگذاری اولیه | مهاجرت برخط |
+|------------|----------------|-------------|
+| `heuristic` | Heuristic خوب | ندارد (`actions=[]`) |
+| `genetic` | Genetic | ندارد |
+| `genetic_heuristic` | Genetic | Heuristic خوب |
+| `ppo` | Genetic (از طریق SharedPPO) | SharedPPO |
+| `heuristic_heuristic` | Heuristic خوب | Heuristic خوب |
+| `heuristic_ppo` | Heuristic خوب | SharedPPO |
+| `heur_v2_heuristic` | Heuristic-v2 | Heuristic خوب |
+| `heur_v2_ppo` | Heuristic-v2 | SharedPPO |
+
+این جدول همان «روش‌های دیگر مقایسه» است که در گزارش می‌توان توضیح داد: تفاوت فقط در سیاست است، نه در seed یا طول شبیه‌سازی (در صورت ثابت بودن فلگ‌های لانچر).
+
+### ۹.۲ لانچر — `scripts/compare.sh`
+
+- برای هر عامل در `--agents` سرور compare را بالا می‌آورد؛  
+- همان بازه seed را اجرا می‌کند؛  
+- در پایان `python -m plots.comparison` نمودار مقایسه‌ای می‌سازد.
+
+پیش‌فرضها با train کمی فرق دارند (مثلاً پورت `5556`، `placement-interval` پیش‌فرض ۵، `max-migrations` پیش‌فرض ۴) تا استنتاج مهاجرت فعال‌تر و مستقل از سرور آموزش باشد.
+
+`--model` مسیر `model.pth` را برای عامل‌های دارای PPO مشخص می‌کند؛ در غیر این صورت آخرین مدل مناسب از نتایج جستجو می‌شود.
+
+### ۹.۳ رسم نمودار — `agents/plots/`
+
+| ماژول | کاربرد |
+|--------|--------|
+| `plots.comparison` | مقایسه چند عامل روی seedها |
+| `plots.training` | منحنی همگرایی از `convergence.json` |
+| `plots.episodes` | متریک‌های اپیزودی یک run تکی |
+
+برچسب‌های نمایشی نمونه: `GA + PPO`, `GA + Heuristic`, `Heuristic-v2 + PPO`, …
+
+### ۹.۴ مفهوم مقایسه عادلانه
+
+برای مقایسه معتبر باید ثابت بمانند:
+
+- بازه seed (`start-seed` و تعداد اپیزود)؛  
+- `simulation.time` و `placement.interval`؛  
+- توپولوژی/تصادفی‌سازی ناشی از همان seed در جاوا؛  
+- مدل PPO (اگر طرف مقایسه مهاجرت PPO است) بدون retraining وسط مقایسه.
+
+تفاوت مجاز و هدفمند: فقط منطق Placement/Migration عامل.
+
+---
+
+## ۱۰. ساختار پوشه‌ها و اسکریپت‌ها
+
+```text
 iFogSim_PPO/
-├── src/org/fog/
-│   ├── placement/
-│   │   ├── PythonBridgePlacementLogic.java   ← TCP bridge + placement log
-│   │   ├── PlacementLogicFactory.java        ← PYTHON_BRIDGE_PLACEMENT = 4
-│   │   └── ClusteredMicroservicePlacementLogic.java  ← 2 fields private→protected
-│   └── test/perfeval/
-│       └── IndustrialIoTSimulation.java      ← Industry 4.0 scenario
-│
-└── python_agent/
-    ├── server.py                 ← TCP server, dispatches to agents, saves results
-    ├── requirements.txt          ← stdlib only; pip install torch numpy gymnasium for PPO
-    └── agents/
-        ├── __init__.py
-        ├── base_agent.py         ← abstract base (implement decide(state) → action)
-        ├── heuristic.py          ← Least-Loaded, edge-first (fog before cloud)
-        └── genetic.py            ← GA: pop=50, gen=100, elitism 10%, latency+energy fitness
+├── IoTLab-Project8.pdf          # مشخصات پروژه
+├── train.sh / compare.sh / run.sh
+├── scripts/
+│   ├── train.sh
+│   ├── compare.sh
+│   ├── run.sh
+│   └── train_windows.ps1
+├── simulator/                   # iFogSim2 + سناریو و Bridge
+│   ├── src/org/fog/...
+│   └── jars/
+└── agents/
+    ├── agents/                  # heuristic, genetic, shared_ppo, ppo, base
+    ├── servers/                 # train, compare, scenario
+    ├── plots/
+    ├── utils/                   # results_paths, plotting
+    └── results/
+        └── <YYYY-MM-DD>/
+            ├── single/<run_name>/
+            │     model.pth, convergence.json, episode_*.json, …
+            └── compare/<run_name>/
+                  ├── plots/agent_comparison.png
+                  └── <agent_id>/episode_*.json
 ```
 
-## How to Run
-
-**Terminal 1 – start the Python agent server**
-
-```bash
-cd python_agent
-python server.py --agent heuristic   # or --agent genetic
-```
-
-**Terminal 2 – run the Java simulation**
-
-Open `IndustrialIoTSimulation.java` in IntelliJ → Run `main()`
-
-The server shuts down automatically after receiving the simulation results.
-Results are saved to `python_agent/results/<agent>_<timestamp>.json`.
-
-## Bridge Protocol
-
-Two message types, both newline-terminated JSON on `localhost:5555`.
-
-**Placement request** (Java → Python, once per IoT sensor):
-
-```
-Java  →  {"step": N, "devices": [...], "requests": [...], "allModules": [...]}
-Python→  {"placement": {"<requestId>": {"<module>": <deviceId>, ...}}}
-```
-
-**Results report** (Java → Python, once after simulation ends via JVM shutdown hook):
-
-```
-Java  →  {"type": "results", "simulationTime": N, "energyPerDevice": [...],
-          "totalEnergy": N, "cloudCost": N, "numRequests": N, "placements": [...]}
-Python→  {"status": "saved", "file": "<path>"}
-```
-
-Both sockets close after the results exchange.
-
-## Adding a New Agent
-
-```python
-# python_agent/agents/ppo.py
-from .base_agent import BasePlacementAgent
-
-class PPOAgent(BasePlacementAgent):
-    def decide(self, state: dict) -> dict:
-        # 1. build observation vector from state["devices"] and state["requests"]
-        # 2. run torch model forward pass
-        # 3. return {"placement": {requestId: {module: deviceId}}}
-        ...
-```
-
-Then register it in `server.py`:
-
-```python
-from agents import HeuristicAgent, GeneticAgent, PPOAgent
-AGENTS["ppo"] = PPOAgent
-```
-
-Run: `python server.py --agent ppo`
+راهنمای مسیر نتایج در `agents/utils/results_paths.py` است (`make_run_dir`, `latest_model_path`, …).
 
 ---
 
-# References
- * Redowan Mahmud, Samodha Pallewatta, Mohammad Goudarzi, and Rajkumar Buyya, <A href="https://arxiv.org/abs/2109.05636">iFogSim2: An Extended iFogSim Simulator for Mobility, Clustering, and Microservice Management in Edge and Fog Computing Environments</A>, Journal of Systems and Software (JSS), Volume 190, Pages: 1-17, ISSN:0164-1212, Elsevier Press, Amsterdam, The Netherlands, August 2022.
- * Harshit Gupta, Amir Vahid Dastjerdi , Soumya K. Ghosh, and Rajkumar Buyya, <A href="http://www.buyya.com/papers/iFogSim.pdf">iFogSim: A Toolkit for Modeling and Simulation of Resource Management Techniques in Internet of Things, Edge and Fog Computing Environments</A>, Software: Practice and Experience (SPE), Volume 47, Issue 9, Pages: 1275-1296, ISSN: 0038-0644, Wiley Press, New York, USA, September 2017.
- * Redowan Mahmud and Rajkumar Buyya, <A href="http://www.buyya.com/papers/iFogSim-Tut.pdf">Modelling and Simulation of Fog and Edge Computing Environments using iFogSim Toolkit</A>, Fog and Edge Computing: Principles and Paradigms, R. Buyya and S. Srirama (eds), 433-466pp, ISBN: 978-111-95-2498-4, Wiley Press, New York, USA, January 2019.
+## ۱۱. نحوه اجرا
+
+### پیش‌نیاز
+
+- JDK + `javac`/`java`  
+- پایتون ۳ با وابستگی‌های `agents/` (ترجیحاً venv داخل `agents/venv`)  
+- PyTorch برای Shared PPO  
+
+### آموزش
+
+از ریشه مخزن:
+
+```bash
+bash train.sh --help   # در صورت پشتیبانی؛ یا مطالعه فلگ‌ها در scripts/train.sh
+bash train.sh --episodes 100 --start-seed 1 --run-name my_run --skip-compile
+```
+
+### مقایسه
+
+```bash
+bash compare.sh --episodes 100 --start-seed 1 \
+  --agents genetic_heuristic,ppo \
+  --model agents/results/<date>/single/<run>/model.pth \
+  --run-name my_compare --skip-compile
+```
+
+یا برای Heuristic-v2:
+
+```bash
+bash compare.sh --episodes 100 --start-seed 1 \
+  --agents heur_v2_heuristic,heur_v2_ppo \
+  --model agents/results/<date>/single/shared_ppo_heur_v2/model.pth \
+  --run-name heur_v2_vs_heur_ppo_seeds1-100 --skip-compile
+```
+
+### سناریوهای قدیمی
+
+`scripts/run.sh` → `servers.scenario` برای مسیرهای غیر shared (در صورت نیاز به سازگاری با مثال‌های قبلی).
 
 ---
 
-## Revised shared-policy PPO training
+## ۱۲. متریک‌های ارزیابی (بدون عدد)
 
-The original PPO experiment remains available, but its policy consumes every
-movable service in one fixed vector and chooses one global `(service, device)`
-pair. The revised training path is separate and does not change the existing
-`server.py` / `IndustrialIoTSimulation4` inference path.
+گزارش نهایی باید این نمودارها را برای عامل‌ها تولید و تحلیل کند (اعداد را از JSON/`plots` بردارید، نه از این README):
 
-New entry points:
+| متریک | مفهوم |
+|--------|--------|
+| Average Latency | میانگین تأخیر انتهابه‌انتها؛ حفظ رفتار نزدیک به بلادرنگ |
+| Energy | مجموع انرژی سخت‌افزارهای شبیه‌سازی‌شده |
+| Service Migration Count | تعداد مهاجرت‌های پذیرفته‌شده میکروسرویس |
+| Critical Task Success Rate | درصد تسک‌های بحرانی تکمیل‌شده قبل از Deadline |
+| Convergence Curve | روند پاداش/متریک‌های آموزش PPO |
 
-- `agents/shared_train_server.py` - persistent GA + shared PPO server
-- `agents/agents/shared_ppo.py` - variable-size candidate-scoring actor/critic
-- `SharedPolicyPPOBridgePlacementLogic.java` - revised simulator protocol
-- `train.sh` and `train_windows.ps1` - compile, start the server, and run episodes
+تحلیل پیشنهادی در گزارش (کیفی):
 
-Run on Linux/macOS:
+- آیا مهاجرت بیشتر همیشه بهتر است یا thrashing ایجاد می‌کند؟  
+- آیا init قوی (Heuristic خوب) کار مهاجرت PPO را کم‌اثر یا مخرب می‌کند؟  
+- آیا Heuristic-v2 + PPO نسبت به Heuristic-v2 + Heuristic در تعمیر چیدمان ضعیف بهتر عمل می‌کند؟  
+- تفاوت GA بدون مهاجرت با GA+Heuristic/PPO چیست؟
 
-```bash
-bash train.sh --episodes 200 --start-seed 1
-```
+---
 
-Run on Windows PowerShell:
+## ۱۳. نکات پیاده‌سازی و محدودیت‌ها
 
-```powershell
-.\train_windows.ps1 -Episodes 200 -StartSeed 1
-```
+1. **چندزبانه بودن:** هر باگ در JSON schema یا timeout سوکت کل اپیزود را خراب می‌کند؛ timeout نتایج در حالت shared معمولاً بیشتر از حالت قدیمی است.  
+2. **preprocessor از پیش‌قرارگرفته:** روی کلاینت شروع می‌شود ولی می‌تواند در actor set بعدی مهاجرت کند.  
+3. **ماسک feasibility:** PPO نباید دستگاه غیرممکن را انتخاب کند؛ ماندن روی فعلی همیشه مجاز نگه داشته می‌شود.  
+4. **تفاوت train و compare:** پیش‌فرض فاصله تیک و سقف مهاجرت ممکن است فرق کند؛ برای مقایسه علمی آن‌ها را یکسان کنید.  
+5. **نام Heuristic-v2:** در کد داخلی هنوز `bad_placement` / `bad_heuristic` برای init ضعیف استفاده می‌شود؛ در نمودارها و پوشه‌های نتیجه با نام Heuristic-v2 نمایش داده می‌شود.  
+6. **README بالادستی iFogSim2:** این سند مخصوص پروژه درسی است؛ هسته شبیه‌ساز همچنان مبتنی بر iFogSim2/CloudSim است.
 
-Both launchers accept a port, simulation duration, placement interval, and
-maximum migrations per step. They compile Java sources automatically unless
-`--skip-compile` / `-SkipCompile` is supplied. The model is written to
-`agents/models/shared_ppo_model.pth`; convergence data is written to
-`agents/results/shared_ppo_convergence.json`.
+---
 
-The shared-policy mode is enabled by the launcher with
-`-Difogsim.shared.policy=true`; it does not require a second Java entry class.
-Critical requests are a seeded exponential arrival stream (mean 225 s per
-client, alongside normal requests with mean 25 s). Each critical request gets a
-seeded 300–500 ms per-task deadline inside the Industrial IoT scenario; it is
-not a launcher parameter. Completion is recorded through iFogSim's loop timing
-and QoS-success accounting. At simulation cutoff, only overdue unfinished
-critical tasks count as misses; non-expired tasks are recorded as pending.
+## مراجع پیاده‌سازی کلیدی (برای مطالعه کد)
 
-Plot a saved convergence history with:
+| موضوع | مسیر |
+|--------|------|
+| مشخصات پروژه | `IoTLab-Project8.pdf` |
+| سناریوی آموزش | `simulator/src/org/fog/test/perfeval/IndustrialIoTSimulationTrain.java` |
+| تحرک | `simulator/src/org/fog/placement/TrainingMobilityController.java` |
+| Shared Bridge | `simulator/src/org/fog/placement/SharedPolicyPPOBridgePlacementLogic.java` |
+| Bridgeهای قدیمی‌تر | `PythonBridgePlacementLogic.java`, `PPOBridgePlacementLogic.java` |
+| Heuristic | `agents/agents/heuristic.py` |
+| Genetic | `agents/agents/genetic.py` |
+| Shared PPO | `agents/agents/shared_ppo.py` |
+| سرور آموزش | `agents/servers/train.py` |
+| سرور مقایسه | `agents/servers/compare.py` |
+| لانچرها | `scripts/train.sh`, `scripts/compare.sh` |
 
-```powershell
-python agents\plot_shared_training.py
-```
+---
 
-### Training terminal output
-
-The shared-policy launcher keeps the terminal compact by default: it prints a
-two-line trajectory summary containing energy, cloud cost, loop delay, mean
-local actor reward, GA placements, and accepted/rejected PPO migrations.
-
-On PowerShell, the independent controls are:
-
-```powershell
-# Print every successful GA placement and PPO migration as well.
-.\train_windows.ps1 -ShowSuccessfulDecisions $true
-
-# Restore all legacy simulator diagnostics, including routing and placement maps.
-.\train_windows.ps1 -ShowSimulatorDiagnostics $true
-
-# Print Python bridge/PPO progress messages.
-.\train_windows.ps1 -ShowPythonProgress $true
-
-# Suppress even the per-trajectory summary.
-.\train_windows.ps1 -ShowEpisodeSummary $false
-```
-
-The Bash equivalents are `--show-successful-decisions`,
-`--simulator-diagnostics`, `--python-progress`, and `--no-episode-summary`.
-
-### Checkpoint control
-
-Training resumes and fine-tunes the selected model by default. Use a distinct
-model/history pair to keep experiments separate:
-
-```powershell
-.\train_windows.ps1 `
-  -ModelPath agents\models\experiment_a.pth `
-  -ConvergencePath agents\results\experiment_a.json
-```
-
-Use `-ResetTraining` only when intentionally starting a fresh experiment. It
-deletes exactly the selected model and convergence JSON before the server
-starts; it does not delete the per-episode result files.
-
-```powershell
-.\train_windows.ps1 -ResetTraining
-```
-
-The Bash equivalents are `--model`, `--convergence`, and `--reset-training`.
-
-### Protocol and learning unit
-
-Step zero sends the original `devices`, `requests`, and `allModules` placement
-schema to Python. Python calls the existing `GeneticAgent` unchanged and
-returns its initial placement. The preprocessor starts on its client exactly as
-in the existing GA setup, but is also an actor and may migrate later. Later
-messages use `type: shared_step` and carry a bounded round-robin service batch
-(32 actors per step by default; `-MaxActorsPerStep` / `--max-actors-per-step`).
-
-Every service actor has:
-
-- its module type and resource demand;
-- its current node, home gateway, peer-service relationship, and client type;
-- a variable candidate list with free CPU/RAM, utilization, node energy delta,
-  estimated request latency, locality flags, and an exact feasibility mask;
-- a local reward split into attributed host energy, request-specific delay,
-  and migration/rejection penalty components.
-
-The same candidate-scoring network is used for every service and every fog
-node. Candidate masks and within-batch CPU reservations prevent the policy from
-sampling destinations that cannot accept a service. The simulator still
-performs a final capacity check.
-
-Training episodes domain-randomize the number of gateways, client count,
-mobile/static share, fog capacity, traffic, and selectivity from the episode
-seed. A given seed is reproducible. For a controlled PPO/no-PPO comparison,
-run the same seed and model in inference mode, setting `--max-migrations 0` for
-the no-migration baseline; the GA initialization is identical in both runs.
-
-Each new episode record also includes average end-to-end latency, separate
-normal/critical latency, critical tasks emitted/on-time/missed, the critical
-deadline success rate, pending/evaluated critical tasks, immediate mean local reward, and accepted/rejected
-migrations. `meanTdTarget` is only a PPO value-learning diagnostic; it is not
-the simulator reward.
+**نویسنده پیاده‌سازی پروژه:** مطابق هدرهای کد (`M-H-Boroumandnia` و همکاران پروژه درسی).  
+برای بخش «نتایج و تحلیل نتایج»، خروجی‌های موجود در `agents/results/<تاریخ>/...` و نمودارهای `plots/` را در گزارش جداگانه مستند کنید.
