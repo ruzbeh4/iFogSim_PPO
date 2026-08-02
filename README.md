@@ -21,8 +21,6 @@
 10. [ساختار پوشه‌ها و اسکریپت‌ها](#۱۰-ساختار-پوشهها-و-اسکریپتها)
 11. [نحوه اجرا](#۱۱-نحوه-اجرا)
 12. [متریک‌های ارزیابی (بدون عدد)](#۱۲-متریکهای-ارزیابی-بدون-عدد)
-13. [نکات پیاده‌سازی و محدودیت‌ها](#۱۳-نکات-پیادهسازی-و-محدودیتها)
-
 ---
 
 ## ۱. شرح مسئله
@@ -712,35 +710,3 @@ bash compare.sh --episodes 100 --start-seed 1 \
 - تفاوت GA بدون مهاجرت با GA+Heuristic/PPO چیست؟
 
 ---
-
-## ۱۳. نکات پیاده‌سازی و محدودیت‌ها
-
-1. **چندزبانه بودن:** هر باگ در JSON schema یا timeout سوکت کل اپیزود را خراب می‌کند؛ timeout نتایج در حالت shared معمولاً بیشتر از حالت قدیمی است.  
-2. **preprocessor از پیش‌قرارگرفته:** روی کلاینت شروع می‌شود ولی می‌تواند در actor set بعدی مهاجرت کند.  
-3. **ماسک feasibility:** PPO نباید دستگاه غیرممکن را انتخاب کند؛ ماندن روی فعلی همیشه مجاز نگه داشته می‌شود.  
-4. **تفاوت train و compare:** پیش‌فرض فاصله تیک و سقف مهاجرت ممکن است فرق کند؛ برای مقایسه علمی آن‌ها را یکسان کنید.  
-5. **نام Heuristic-v2:** در کد داخلی هنوز `bad_placement` / `bad_heuristic` برای init ضعیف استفاده می‌شود؛ در نمودارها و پوشه‌های نتیجه با نام Heuristic-v2 نمایش داده می‌شود.  
-6. **README بالادستی iFogSim2:** این سند مخصوص پروژه درسی است؛ هسته شبیه‌ساز همچنان مبتنی بر iFogSim2/CloudSim است.
-
----
-
-## مراجع پیاده‌سازی کلیدی (برای مطالعه کد)
-
-| موضوع | مسیر |
-|--------|------|
-| مشخصات پروژه | `IoTLab-Project8.pdf` |
-| سناریوی آموزش | `simulator/src/org/fog/test/perfeval/IndustrialIoTSimulationTrain.java` |
-| تحرک | `simulator/src/org/fog/placement/TrainingMobilityController.java` |
-| Shared Bridge | `simulator/src/org/fog/placement/SharedPolicyPPOBridgePlacementLogic.java` |
-| Bridgeهای قدیمی‌تر | `PythonBridgePlacementLogic.java`, `PPOBridgePlacementLogic.java` |
-| Heuristic | `agents/agents/heuristic.py` |
-| Genetic | `agents/agents/genetic.py` |
-| Shared PPO | `agents/agents/shared_ppo.py` |
-| سرور آموزش | `agents/servers/train.py` |
-| سرور مقایسه | `agents/servers/compare.py` |
-| لانچرها | `scripts/train.sh`, `scripts/compare.sh` |
-
----
-
-**نویسنده پیاده‌سازی پروژه:** مطابق هدرهای کد (`M-H-Boroumandnia` و همکاران پروژه درسی).  
-برای بخش «نتایج و تحلیل نتایج»، خروجی‌های موجود در `agents/results/<تاریخ>/...` و نمودارهای `plots/` را در گزارش جداگانه مستند کنید.
