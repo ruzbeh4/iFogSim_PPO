@@ -27,8 +27,10 @@ build/
 .pytest_cache/
 .mypy_cache/
 
-# Results / logs
-agents/results/
+# Results / logs (keep plots tracked; ignore heavy JSON/models)
+agents/results/**
+!agents/results/**/
+!agents/results/**/*.png
 *.log
 
 # macOS
